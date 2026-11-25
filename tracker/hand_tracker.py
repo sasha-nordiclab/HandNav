@@ -11,12 +11,14 @@ Gestures
   with --two-hands also: two pinches, move apart/close: zoom; turn like a wheel: roll
   fist squeezed twice quickly ......... fit all
   fingers held up and still ........... standard view (see POSES)
+  thumb up, held ...................... lock / unlock: while locked nothing moves
   open palm / no hand ................. idle
 
 Packets to 127.0.0.1:PORT (JSON, each carries "k": TOKEN):
   {"t":"orbit","dx":..,"dy":..}  {"t":"pan","dx":..,"dy":..}  {"t":"zoom","k2":..}
   {"t":"roll","a":radians, counter-clockwise on screen}  {"t":"depth","d":log of hand size change}
   {"t":"view","v":"front|rear|top|bottom|right|left|iso|fit"}
+  {"t":"lock","on":true|false}
   {"t":"mode","m":"idle|orbit|pan|zoom"}  {"t":"status","msg":..}  {"t":"alive"}
   {"t":"bye","msg":..,"ok":true|false}
 dx/dy are in units of frame height, +x right, +y up (mirror view).
@@ -114,6 +116,18 @@ def pose_of(pts):
     if key + (None,) in POSES:
         return POSES[key + (None,)]
     return None if thumb is None else POSES.get(key + (thumb,))
+
+
+def thumb_up(pts):
+    """A fist with the thumb stretched upwards."""
+    wrist = pts[WRIST]
+    if not all(_d(pts[t], wrist) < 1.05 * _d(pts[m], wrist) for t, m in zip(TIPS, MCPS)):
+        return False
+    scale = max(_d(pts[0], pts[9]), _d(pts[5], pts[17]), 1e-6)
+    tip = pts[THUMB_TIP]
+    highest = min(y for i, (_, y) in enumerate(pts) if i not in (2, 3, 4))
+    straight = _d(tip, pts[2]) > 0.85 * (_d(pts[2], pts[3]) + _d(pts[3], tip))
+    return straight and highest - tip[1] > 0.30 * scale and pts[2][1] - tip[1] > 0.35 * scale
 
 
 def twist_of(pts):
@@ -352,7 +366,10 @@ class Gestures:
 
     def __init__(self, pinch_on=0.30, pinch_off=None, fist_on=0.90, fist_off=None,
                  smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3,
-                 roll=True, push=True, squeeze=True, pinch_push=True, accel=0.0):
+                 roll=True, push=True, squeeze=True, pinch_push=True, accel=0.0, lock=True):
+        self.use_lock, self.locked = lock, False
+        self._lock_at, self._lock_t, self._lock_n = None, 0.0, 0   # thumb held up: where, since, frames
+        self._lock_miss, self._lock_done = 0, False
         self.accel = min(max(accel, 0.0), 1.0)
         self._speed = Speed(usual=0.35)       # picture heights per second
         self._turn_speed = Speed(usual=1.0)   # radians per second
@@ -410,6 +427,7 @@ class Gestures:
         if push is not None:    # per cent of the apparent size
             self._push.engage = math.log(1 + push / 100)
 
+    LOCK_HOLD = 0.8     # seconds the thumb must be held up, still
     POSE_STILL = 0.07
     PALMS_AFTER = 1.5   # idle seconds before two open palms count: letting go of a zoom is not "fit"
     SQUEEZE = (0.05, 0.45)      # seconds a squeeze may last; a longer fist is a pan
@@ -455,6 +473,14 @@ class Gestures:
         before, self._now = self._now, self._now + 1 / 30 if now is None else now
         self._dt = min(max(self._now - before, 1 / 120), 0.2)
         hands = self.classify_hands(hands_pts)
+        thumbs = [c for (_, c), pts in zip(hands, hands_pts) if thumb_up(pts)] if self.use_lock else []
+        if self._lock(thumbs):
+            return self.set_locked(not self.locked)
+        if self.locked:
+            return []
+        if thumbs and self.mode != "pan":
+            # a thumb up is no fist; but raising the thumb during a pan does not interrupt it
+            hands = [("open", c) if c in thumbs else (g, c) for g, c in hands]
         view = self._view(hands, hands_pts)
         if view:
             return view
@@ -546,6 +572,32 @@ class Gestures:
                 extra = [{"t": "roll", "a": d}]
         return self._move(val) + extra
 
+    def set_locked(self, on):
+        """Lock or unlock; returns the packets to send."""
+        self.locked = bool(on)
+        packets = self._switch("idle", None) if self.mode != "idle" else []
+        self._latch, self._calm = True, 0      # after unlocking the hand has to open first
+        self._sq_on = self._sq_end = None
+        self._pose, self._pose_done = None, False
+        return packets + [{"t": "lock", "on": self.locked}]
+
+    def _lock(self, thumbs):
+        """True once when a thumb has been held up long enough."""
+        if len(thumbs) != 1:
+            self._lock_miss += 1
+            if self._lock_miss > 2:    # one or two unclear frames do not matter
+                self._lock_at, self._lock_done = None, False
+            return False
+        self._lock_miss = 0
+        if self._lock_at is None or _d(thumbs[0], self._lock_at) > self.POSE_STILL:
+            self._lock_at, self._lock_t, self._lock_n = thumbs[0], self._now, 0
+            return False
+        self._lock_n += 1
+        if self._lock_done or self._lock_n < 4 or self._now - self._lock_t < self.LOCK_HOLD:
+            return False
+        self._lock_done = True
+        return True
+
     def _squeeze(self, hands):
         """True once when a fist was closed twice, quickly and in place."""
         fist = next((c for g, c in hands if g == "fist"), None)
@@ -614,6 +666,11 @@ class Gestures:
     @property
     def label(self):
         """What is happening now, for the preview."""
+        if self._lock_at is not None and not self._lock_done and self._lock_n > 2:
+            return "%s %d%%" % ("UNLOCK" if self.locked else "LOCK",
+                                min(99, int(100 * (self._now - self._lock_t) / self.LOCK_HOLD)))
+        if self.locked:
+            return "LOCKED"
         if self.mode == "orbit" and self._twist.active:
             return "ROLL"
         if self.mode == "orbit" and self._push.active:
@@ -817,6 +874,7 @@ def main():
     ap.add_argument("--no-roll", action="store_true", help="no roll by twisting")
     ap.add_argument("--no-push", action="store_true", help="no zoom by pushing or pulling the fist")
     ap.add_argument("--no-pinch-push", action="store_true", help="no zoom by pushing or pulling the pinch")
+    ap.add_argument("--no-lock", action="store_true", help="no lock by holding the thumb up")
     ap.add_argument("--no-squeeze", action="store_true", help="no fit all by squeezing twice")
     ap.add_argument("--accel", type=float, default=0.5, help="acceleration 0..1: fast movements go further, slow ones are finer (0 = off)")
     ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
@@ -1029,7 +1087,7 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
     starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold,
                  roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze,
-                 pinch_push=not args.no_pinch_push, accel=args.accel)
+                 pinch_push=not args.no_pinch_push, accel=args.accel, lock=not args.no_lock)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     g.tune({"twist_start": args.twist_start, "push_start": args.push_start})
     guard, frames_to_face = (FaceGuard(args.face_ratio) if face_detector else None), 0
@@ -1064,6 +1122,9 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
             values = dict(tuned)
             tuned.clear()
             g.tune(values)
+            if isinstance(values.get("locked"), bool) and values["locked"] != g.locked:   # button in the panel
+                for pkt in g.set_locked(values["locked"]):
+                    link.packet(**pkt)
             ratio = values.get("face_ratio")
             if guard is not None and isinstance(ratio, (int, float)) and 0.1 <= ratio <= 3:
                 guard.ratio = ratio

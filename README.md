@@ -21,6 +21,7 @@ Gestures work like grabbing the model: the view follows your hand while the gest
 | Pinch or fist, pull away from the camera / push towards it | Zoom in / out (coarse) |
 | Squeeze a fist twice, quickly and in place | Fit all |
 | Open or relaxed hand, or no hand in view | Pause |
+| Thumb up, held still for about a second | Lock / unlock: while locked, no gesture moves anything |
 
 Raise fingers with the hand pointing up and hold still for about 0.3 s to get a standard view. The name and progress are shown over the camera picture.
 
@@ -68,6 +69,7 @@ The addon itself installs, downloads and compiles nothing. To remove the tracker
 
 - **Sensitivity** in the panel opens sliders that act while you move your hand: the speed of every motion, and how easily every gesture starts. To the right is always more sensitive.
 - **Acceleration**, one of the sliders, works like that of a mouse: fast movements go further, slow ones are finer. All the way to the left switches it off.
+- **Lock** in the panel does the same as the thumb gesture.
 - **Gestures** in the panel shows the list of gestures.
 - **Settings…** (or FreeCAD's preferences, page HandNav, once the workbench has been opened) has everything else: gestures on or off, directions, camera. Every setting explains itself in a tooltip.
 

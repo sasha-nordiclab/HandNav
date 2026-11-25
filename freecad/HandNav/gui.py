@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ICONS = os.path.join(HERE, "resources", "icons")
 # The tracker is a separate program that the user installs with tracker/install.sh.
 TRACKER_DIR = os.path.expanduser("~/Library/Application Support/HandNav")
-TRACKER_VERSION = "5"   # must match tracker/VERSION
+TRACKER_VERSION = "6"   # must match tracker/VERSION
 INSTALLER = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tracker", "install.sh")
 HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")
 TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker
@@ -169,6 +169,13 @@ class PreviewDock(QtWidgets.QDockWidget):
             button.clicked.connect(lambda on, n=name: self.show_section(n if on else ""))
             buttons.addWidget(button)
             self._sections[name] = (button, area)
+        self.lock_button = QtWidgets.QToolButton()
+        self.lock_button.setText("Lock")
+        self.lock_button.setToolTip("Ignore all gestures until unlocked.\n"
+                                    "By hand: hold the thumb up for about a second, again to unlock.")
+        self.lock_button.setCheckable(True)
+        self.lock_button.clicked.connect(lambda on: navigator().lock(on))
+        buttons.addWidget(self.lock_button)
         settings_button = QtWidgets.QToolButton()
         settings_button.setText("Settings…")
         settings_button.setToolTip("Open the HandNav settings")
@@ -353,6 +360,15 @@ class Navigator(QtCore.QObject):
         self._write_args()
         self._launch(_use_terminal())
 
+    def lock(self, on):
+        if self.token:
+            self._to_tracker(("set %s %s" % (self.token, json.dumps({"locked": bool(on)}))).encode())
+
+    def _show_lock(self, on):
+        if self.dock is not None:
+            self.dock.lock_button.setChecked(on)
+        self._show_mode("locked" if on else "idle")
+
     def tune_tracker(self):
         """Hand the current thresholds to the running tracker."""
         if not self.token:
@@ -424,6 +440,8 @@ class Navigator(QtCore.QObject):
                     roll += _num(m, "a", -1, 1)
                 elif t == "depth":
                     push += _num(m, "d", -1, 1)
+                elif t == "lock":
+                    self._show_lock(m.get("on") is True)
                 elif t == "view":
                     self._set_view(str(m.get("v")))
                 elif t == "mode":
@@ -432,6 +450,7 @@ class Navigator(QtCore.QObject):
                 elif t == "status":
                     self._show_text(str(m.get("msg", "")))
                 elif t == "bye":
+                    self._show_lock(False)   # a new tracker starts unlocked
                     self._bye(str(m.get("msg", "")), bool(m.get("ok", True)))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue

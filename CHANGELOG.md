@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.0 (2026-11-25)
+
+- Lock: hold the thumb up, or press Lock in the panel, and gestures are ignored until unlocked. Run the tracker's installer again after the update.
+
 ## 0.11.1 (2026-11-25)
 
 - Over the face, only a hand at the same distance as the face is ignored, judged independently of the pose. Run the tracker's installer again after the update.

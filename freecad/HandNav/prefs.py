@@ -23,6 +23,8 @@ SPEC = [
          "See the Gestures page for the list."),
         ("TwoHands", "bool", False, "Two-hand gestures as well",
          "Also follows the second hand: zoom by moving two pinches apart. Slower."),
+        ("EnableLock", "bool", True, "Lock by holding the thumb up",
+         "While locked, no gesture moves anything. Hold the thumb up again, or press Lock in the panel, to unlock."),
         ("FaceGuard", "bool", True, "Ignore a hand that touches the face",
          "Scratching your nose or leaning on your hand moves nothing. A hand held nearer to the camera\n"
          "than the face still works, also in front of it. The panel shows FACE while a hand is ignored."),
@@ -108,6 +110,7 @@ GUIDE = """
 <tr><td>Thumb + middle finger, others up;<br>hand up / down</td><td>Zoom in / out</td></tr>
 <tr><td>Fist or pinch, pull back / push to the camera</td><td>Zoom in / out (coarse)</td></tr>
 <tr><td>Open hand</td><td>Pause</td></tr>
+<tr><td>Thumb up, hold about a second</td><td>Lock / unlock</td></tr>
 <tr><td colspan="2"><b>Fit all</b></td></tr>
 <tr><td>Squeeze the fist twice, quickly</td><td>Fit all</td></tr>
 <tr><td>Little finger, or four fingers with the<br>thumb across the palm</td><td>Fit all</td></tr>
@@ -169,7 +172,7 @@ def tracker_args(live=True):
         args += ["--camera-name", get("CameraName").strip()]
     for name, option, when in (("EnableRoll", "--no-roll", False), ("EnablePush", "--no-push", False),
                                ("EnablePinchPush", "--no-pinch-push", False),
-                               ("FaceGuard", "--no-face-guard", False),
+                               ("FaceGuard", "--no-face-guard", False), ("EnableLock", "--no-lock", False),
                                ("EnableSqueeze", "--no-squeeze", False), ("TwoHands", "--two-hands", True)):
         if get(name) == when:
             args.append(option)

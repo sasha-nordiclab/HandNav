@@ -555,6 +555,62 @@ class FaceSearchTest(unittest.TestCase):
                     self.assertTrue(x >= 0 and y >= 0 and side > 0 and x + side <= w and y + side <= h)
 
 
+def thumb(cx, cy):
+    """Fist seen from the side with the thumb stretched up: wrist to the right, knuckles to the left."""
+    p = turned(hand(cx, cy, "fist"), 90, (cx, cy))
+    top = min(y for _, y in p)
+    p[2], p[3], p[4] = (cx - 0.01, top), (cx - 0.01, top - 0.04), (cx - 0.01, top - 0.08)
+    return p
+
+
+class LockTest(unittest.TestCase):
+    THUMB, OPEN = [[thumb(0.5, 0.5)]], [[hand(0.5, 0.5, "open")]]
+    PINCH = [[hand(0.3 + 0.01 * i, 0.5, "pinch")] for i in range(15)]
+
+    def test_thumb_is_told_apart(self):
+        self.assertTrue(ht.thumb_up(thumb(0.5, 0.5)))
+        for kind in ("open", "relaxed", "fist", "pinch", "natural_pinch", "gap"):
+            self.assertFalse(ht.thumb_up(hand(0.5, 0.5, kind)), kind)
+            self.assertFalse(ht.thumb_up(turned(hand(0.5, 0.5, kind), 90)), kind)
+        for raised, out, name in ViewTest.CASES:
+            self.assertFalse(ht.thumb_up(fingers(0.5, 0.5, raised, out)), name)
+        self.assertFalse(ht.thumb_up(turned(thumb(0.5, 0.5), 180)))   # thumb down
+
+    def test_lock_stops_everything_and_unlock_brings_it_back(self):
+        g = ht.Gestures()
+        self.assertEqual(feed(g, self.THUMB * 40), [{"t": "lock", "on": True}])
+        self.assertEqual(g.label, "LOCKED")
+        f, o = SqueezeTest.FIST, SqueezeTest.OPEN
+        views = [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]] * 30
+        self.assertEqual(feed(g, self.OPEN * 5 + self.PINCH + views + o * 5 + f * 6 + o * 5 + f * 6 + o * 10), [])
+        self.assertEqual(feed(g, self.THUMB * 40), [{"t": "lock", "on": False}])
+        self.assertIn("orbit", kinds(feed(g, self.OPEN * 6 + self.PINCH)))
+
+    def test_holding_on_does_not_toggle_again_and_short_does_nothing(self):
+        g = ht.Gestures()
+        self.assertEqual(feed(g, self.THUMB * 200), [{"t": "lock", "on": True}])
+        self.assertEqual(feed(ht.Gestures(), self.THUMB * 15 + self.OPEN * 10), [])
+
+    def test_moving_thumb_does_not_lock_or_pan(self):
+        self.assertEqual(feed(ht.Gestures(), [[thumb(0.2 + 0.02 * i, 0.5)] for i in range(30)]), [])
+
+    def test_lock_ends_a_running_gesture(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "pinch")]] * 5)
+        self.assertEqual(g.set_locked(True), [{"t": "mode", "m": "idle"}, {"t": "lock", "on": True}])
+        self.assertEqual(g.mode, "idle")
+
+    def test_raising_the_thumb_out_of_a_still_fist_locks(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "fist")]] * 5)
+        self.assertEqual(g.mode, "pan")
+        self.assertIn({"t": "lock", "on": True}, feed(g, self.THUMB * 40))
+        self.assertEqual(g.mode, "idle")
+
+    def test_can_be_switched_off(self):
+        self.assertNotIn("lock", kinds(feed(ht.Gestures(lock=False), self.THUMB * 60)))
+
+
 class TuneTest(unittest.TestCase):
     def test_thresholds_change_while_running(self):
         g = ht.Gestures()
