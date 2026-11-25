@@ -1,6 +1,6 @@
 # HandNav
 
-Navigate the FreeCAD 3D view with your hand in front of a webcam: orbit, pan and zoom without a 3D mouse.
+Navigate the FreeCAD 3D view with one hand in front of a webcam: orbit, roll, pan, zoom and standard views, without a 3D mouse.
 
 A small tracker process watches the camera with [MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) hand landmarks and sends motion to a FreeCAD addon, which moves the camera of the active 3D view.
 
