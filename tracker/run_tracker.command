@@ -1,5 +1,10 @@
 #!/bin/zsh
 # Starts the HandNav tracker; creates its Python environment on first run.
+#
+# The whole script is one { ... } group ending in exit: zsh then parses all of it before
+# running anything, so replacing this file while a tracker is running (an upgrade) cannot
+# make the running shell continue into the new file's text.
+{
 cd "${0:A:h}" || exit 1
 # FreeCAD points these into its own bundle; they must not reach the tracker's Python.
 unset PYTHONHOME PYTHONPATH PREFIX LD_LIBRARY_PATH SSL_CERT_FILE GIT_SSL_CAINFO
@@ -25,3 +30,4 @@ args=()
 rc=$?
 if [ $rc -ne 0 ]; then echo; echo "The tracker exited with an error ($rc). You can close this window."; read -k 1; fi
 exit $rc
+}

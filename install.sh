@@ -22,8 +22,16 @@ else
 fi
 DST="$MOD/HandNav"
 mkdir -p "$DST/tracker"
-cp "$SRC"/{InitGui.py,handnav_gui.py,handnav.svg,package.xml,LICENSE,README.md} "$DST/"
-cp "$SRC"/tracker/{hand_tracker.py,run_tracker.command,requirements.txt} "$DST/tracker/"
+# Copy next to the target and rename over it. A plain cp rewrites the file in place, and a
+# launcher that is running at that moment (HandNav switched on) would go on reading the new text.
+put() {
+  cp "$SRC/$1" "$DST/$1.new.$$"
+  mv -f "$DST/$1.new.$$" "$DST/$1"
+}
+for f in InitGui.py handnav_gui.py handnav.svg package.xml LICENSE README.md \
+         tracker/hand_tracker.py tracker/run_tracker.command tracker/requirements.txt; do
+  put "$f"
+done
 chmod +x "$DST/tracker/run_tracker.command"
 # a ZIP downloaded with a browser is quarantined; Terminal would refuse to run the launcher
 xattr -dr com.apple.quarantine "$DST" 2>/dev/null || true
