@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """HandNav tracker: webcam -> hand gestures -> UDP packets for the FreeCAD addon.
 
 Gestures
   pinch (thumb + index) and move ...... orbit
   pinch and twist the hand ............ roll (rotate in the screen plane)
   fist and move ....................... pan
-  fist towards / away from the camera . zoom
+  fist or pinch to / from the camera .. zoom
   thumb + middle finger, up / down .... zoom (index, ring and little finger up)
   with --two-hands also: two pinches, move apart/close: zoom; turn like a wheel: roll
   fist squeezed twice quickly ......... fit all
@@ -22,7 +23,7 @@ dx/dy are in units of frame height, +x right, +y up (mirror view).
 With --embed the preview is sent to the same port as TOKEN + JPEG datagrams instead of a window.
 
 Thresholds can be changed while running with "set TOKEN {json}" on PORT+1 (see Gestures.tune).
-The tracker stops when it receives "quit" on PORT+1, when nobody listens on PORT any more
+The tracker stops when it receives "quit TOKEN" on PORT+1, when nobody listens on PORT any more
 (FreeCAD switched HandNav off, quit or crashed), or on Ctrl+C / closing its terminal window.
 """
 import argparse
@@ -217,7 +218,8 @@ class Gestures:
 
     def __init__(self, pinch_on=0.30, pinch_off=None, fist_on=0.90, fist_off=None,
                  smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3,
-                 roll=True, push=True, squeeze=True):
+                 roll=True, push=True, squeeze=True, pinch_push=True):
+        self.use_pinch_push = pinch_push
         self.use_roll, self.use_push, self.use_squeeze = roll, push, squeeze
         self.pinch_on = pinch_on
         self.pinch_off = pinch_on * 1.5 if pinch_off is None else pinch_off
@@ -344,7 +346,7 @@ class Gestures:
             want, val, aux = "zoom", (_d(a, b), 0.0), math.atan2(a[1] - b[1], b[0] - a[0])
         elif len(pinch) == 1:
             # the wrist, because twisting the hand moves the palm but hardly the wrist
-            want, val, aux = "orbit", pinch[0][WRIST], twist_of(pinch[0])
+            want, val, aux = "orbit", pinch[0][WRIST], (twist_of(pinch[0]), size_of(pinch[0]))
         elif fist:
             want, val = "pan", (self._nearest(fist) if self.mode == "pan" else fist[0])
             aux = size_of(fists[val])
@@ -377,6 +379,21 @@ class Gestures:
         extra = []
         if self.mode == "lift":
             pass
+        elif self.mode == "orbit":
+            twist, size = aux
+            d = self._twist.update(twist) if self.use_roll else 0.0
+            if d:
+                extra = [{"t": "roll", "a": d}]
+            if self._twist.active:
+                self._push.reset(size)     # turning the hand changes its apparent size
+            elif self.use_pinch_push:
+                d = self._push.update(size)
+                if d:
+                    extra = [{"t": "depth", "d": d}]
+            if self._twist.active or self._push.active:
+                # the small shift that comes with a twist or a push must not orbit as well
+                self._s = self._prev = val
+                return extra
         elif not (self.use_push if self.mode == "pan" else self.use_roll):
             pass
         elif self.mode == "pan":
@@ -384,14 +401,9 @@ class Gestures:
             if d:
                 extra = [{"t": "depth", "d": d}]
         else:
-            axis = self._twist if self.mode == "orbit" else self._wheel
-            d = axis.update(aux)
+            d = self._wheel.update(aux)
             if d:
                 extra = [{"t": "roll", "a": d}]
-            if axis is self._twist and axis.active:
-                # rolling: the small shift that comes with a twist must not orbit as well
-                self._s = self._prev = val
-                return extra
         return self._move(val) + extra
 
     def _squeeze(self, hands):
@@ -458,6 +470,8 @@ class Gestures:
         """What is happening now, for the preview."""
         if self.mode == "orbit" and self._twist.active:
             return "ROLL"
+        if self.mode == "orbit" and self._push.active:
+            return "ZOOM"
         if self.mode == "idle" and self._pose and (self._pose_done or self._pose_n > 1):
             part = min(99, int(100 * (self._now - self._pose_t) / self.view_hold))
             return self._pose.upper() + ("" if self._pose_done else " %d%%" % part)
@@ -535,6 +549,10 @@ class Link:
             self.packet(t="alive")
 
 
+def quit_message(token):
+    return ("quit " + token).strip().encode()
+
+
 def parse_set(data, token):
     """The values of a "set TOKEN {json}" datagram, or {} for anything else."""
     try:
@@ -545,7 +563,7 @@ def parse_set(data, token):
     return values if word == "set" and token and got == token and isinstance(values, dict) else {}
 
 
-def bind_control(port, wait=15.0, waiting=None):
+def bind_control(port, wait=15.0, waiting=None, token=""):  # nosec B107 - none when standalone
     """Bind the stop port. A tracker left over from an earlier start is told to quit first;
     `waiting()` is called about once a second meanwhile and may return True to give up."""
     deadline = time.monotonic() + wait
@@ -561,7 +579,7 @@ def bind_control(port, wait=15.0, waiting=None):
             return None
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            probe.sendto(b"quit", ("127.0.0.1", port))
+            probe.sendto(quit_message(token), ("127.0.0.1", port))
         except OSError:
             pass
         probe.close()
@@ -579,12 +597,12 @@ def model_ok():
 def ensure_model(say=print):
     if model_ok():
         return
-    import subprocess
-    say("Downloading the hand landmark model (about 8 MB)…")
+    import subprocess  # nosec B404
+    say("Downloading the hand landmark model (about 8 MB) from Google…")
     tmp = MODEL_PATH + ".part"
     # curl uses the system certificates; python.org builds often have none
     subprocess.run(["/usr/bin/curl", "-fsSL", "--connect-timeout", "20", "--max-time", "600",
-                    "-o", tmp, MODEL_URL], check=True)
+                    "-o", tmp, MODEL_URL], check=True)  # nosec B603 - fixed program and address
     os.replace(tmp, MODEL_PATH)
     if not model_ok():
         os.remove(MODEL_PATH)
@@ -594,10 +612,10 @@ def ensure_model(say=print):
 def list_cameras():
     """[(name, unique_id)] in OpenCV's index order (AVFoundation devices sorted by unique ID).
     None when the list could not be read, [] when there is no camera."""
-    import subprocess
+    import subprocess  # nosec B404
     try:
         raw = subprocess.run(["/usr/sbin/system_profiler", "-json", "SPCameraDataType"],
-                             capture_output=True, text=True, timeout=20).stdout
+                             capture_output=True, text=True, timeout=20).stdout  # nosec B603
         cams = [(c.get("_name", "?"), c.get("spcamera_unique-id", "")) for c in json.loads(raw)["SPCameraDataType"]]
     except Exception:
         return None
@@ -629,6 +647,7 @@ def main():
     ap.add_argument("--camera-name", default="", help="part of a camera name, e.g. FUJIFILM")
     ap.add_argument("--port", type=int, default=47800)
     ap.add_argument("--token-file", default="", help="file with the session token written by the FreeCAD addon")
+    ap.add_argument("--fetch-model", action="store_true", help="only download the hand landmark model")
     ap.add_argument("--embed", action="store_true", help="send the preview to FreeCAD instead of opening a window")
     ap.add_argument("--two-hands", action="store_true", help="track two hands: adds the two-hand gestures")
     ap.add_argument("--no-preview", action="store_true", help="no preview window")
@@ -638,17 +657,21 @@ def main():
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
     ap.add_argument("--no-roll", action="store_true", help="no roll by twisting")
     ap.add_argument("--no-push", action="store_true", help="no zoom by pushing or pulling the fist")
+    ap.add_argument("--no-pinch-push", action="store_true", help="no zoom by pushing or pulling the pinch")
     ap.add_argument("--no-squeeze", action="store_true", help="no fit all by squeezing twice")
     ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
-    ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before fist zoom starts")
+    ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before push zoom starts")
     ap.add_argument("--min-hand", type=float, default=0.12,
                     help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
     ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
     ap.add_argument("--width", type=int, default=960, help="width of the picture that is analysed")
     ap.add_argument("--view-hold", type=float, default=0.3, help="seconds raised fingers must be held still")
     args = ap.parse_args()
+    if args.fetch_model:   # used by the installer
+        ensure_model()
+        return
 
-    token = ""
+    token = ""  # nosec B105 - none when standalone
     if args.token_file:   # a file, not an argument: the process list is readable by every user
         try:
             with open(os.path.join(HERE, args.token_file)) as f:
@@ -672,7 +695,7 @@ def main():
         try:
             while True:
                 data = ctl.recv(4096)
-                if data.startswith(b"quit"):
+                if data.strip() == quit_message(token):
                     stop["why"] = "switched off"
                     break
                 values = parse_set(data, token)
@@ -710,7 +733,7 @@ def main():
         link.packet(t="status", msg="Waiting for the previous tracker to stop…")
         return bool(link.gone or stop["why"])
 
-    ctl = bind_control(args.port + 1, waiting=still_waiting)
+    ctl = bind_control(args.port + 1, waiting=still_waiting, token=token)
     if ctl is None:
         if link.gone or stop["why"]:
             finish(stop["why"] or "FreeCAD is not listening")
@@ -831,7 +854,8 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
 
     starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold,
-                 roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze)
+                 roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze,
+                 pinch_push=not args.no_pinch_push)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     g.tune({"twist_start": args.twist_start, "push_start": args.push_start})
     picker, had = HandPicker(), False

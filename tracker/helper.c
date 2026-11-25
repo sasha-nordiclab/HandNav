@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* Main executable of HandNavTracker.app: a windowless app that runs run_tracker.command.
  *
  * macOS grants camera access to the application responsible for a process. FreeCAD.app declares
@@ -26,7 +27,7 @@ int main(void) {
     char raw[PATH_MAX], dir[PATH_MAX], path[PATH_MAX + 32];
     uint32_t size = sizeof raw;
     if (_NSGetExecutablePath(raw, &size) != 0 || !realpath(raw, dir)) return 1;
-    for (int i = 0; i < 4; i++) {       /* tracker/HandNavTracker.app/Contents/MacOS/HandNavTracker -> tracker */
+    for (int i = 0; i < 4; i++) {       /* HandNav/HandNavTracker.app/Contents/MacOS/HandNavTracker -> HandNav */
         char *slash = strrchr(dir, '/');
         if (!slash) return 1;
         *slash = 0;

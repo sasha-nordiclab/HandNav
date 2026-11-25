@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tracker logic tests. Pure Python: no camera, mediapipe or OpenCV needed.
 
     python3 -m unittest discover -s tests
@@ -253,6 +254,32 @@ class SixAxisTest(unittest.TestCase):
             pk = feed(g, [[scaled(hand(0.5, 0.5, "fist"), 1 + step * i)] for i in range(25)])
             self.assertGreater(sign * sum(p["d"] for p in pk if p["t"] == "depth"), 0.1)
 
+    def test_pinch_towards_the_camera_zooms_and_does_not_orbit(self):
+        for step, sign in ((0.02, 1), (-0.02, -1)):
+            g = ht.Gestures()
+            pk = feed(g, [[scaled(hand(0.5, 0.5, "pinch"), 1 + step * i)] for i in range(25)])
+            self.assertGreater(sign * sum(p["d"] for p in pk if p["t"] == "depth"), 0.1)
+            self.assertEqual(g.label, "ZOOM")
+            moved = sum(abs(p["dx"]) + abs(p["dy"]) for p in pk if p["t"] == "orbit")
+            self.assertLess(moved, 0.05)
+
+    def test_orbit_does_not_zoom(self):
+        g = ht.Gestures()
+        pk = feed(g, [[scaled(hand(0.2 + 0.01 * i, 0.5, "pinch"), 1 + 0.03 * math.sin(i))] for i in range(40)])
+        self.assertNotIn("depth", kinds(pk))
+        self.assertIn("orbit", kinds(pk))
+
+    def test_twist_does_not_zoom(self):
+        g = ht.Gestures()
+        pk = feed(g, [[scaled(turned(hand(0.5, 0.5, "pinch"), 2 * i), 1 + 0.004 * i)] for i in range(30)])
+        self.assertIn("roll", kinds(pk))
+        self.assertNotIn("depth", kinds(pk))
+
+    def test_pinch_zoom_can_be_switched_off(self):
+        g = ht.Gestures(pinch_push=False)
+        pk = feed(g, [[scaled(hand(0.5, 0.5, "pinch"), 1 + 0.02 * i)] for i in range(25)])
+        self.assertNotIn("depth", kinds(pk))
+
     def test_plain_pan_does_not_zoom(self):
         g = ht.Gestures()
         pk = feed(g, [[scaled(hand(0.2 + 0.01 * i, 0.5, "fist"), 1 + 0.03 * math.sin(i))] for i in range(40)])
@@ -404,6 +431,10 @@ class TuneTest(unittest.TestCase):
         before = (g.pinch_on, g.fist_on, g.smooth, g.view_hold, g._twist.engage, g._push.engage)
         g.tune({"pinch": float("nan"), "fist": "x", "smooth": None, "view_hold": True, "no_such": 1})
         self.assertEqual(before, (g.pinch_on, g.fist_on, g.smooth, g.view_hold, g._twist.engage, g._push.engage))
+
+    def test_stop_needs_the_secret(self):
+        self.assertEqual(ht.quit_message("abc"), b"quit abc")
+        self.assertEqual(ht.quit_message(""), b"quit")   # standalone, without a secret
 
     def test_only_the_session_may_tune(self):
         self.assertEqual(ht.parse_set(b'set abc {"pinch": 0.2}', "abc"), {"pinch": 0.2})
@@ -575,7 +606,7 @@ class LinkTest(unittest.TestCase):
         t0 = time.monotonic()
         self.assertIsNone(ht.bind_control(port, wait=1.2))
         self.assertGreater(time.monotonic() - t0, 1.0)
-        self.assertTrue(stale.recv(64).startswith(b"quit"))
+        self.assertEqual(stale.recv(64), b"quit")
         stale.close()
         fresh = ht.bind_control(port)
         self.assertIsNotNone(fresh)

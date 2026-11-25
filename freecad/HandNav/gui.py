@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: MIT
 """HandNav FreeCAD side: receives motion packets over UDP and moves the active 3D view camera."""
-import hashlib
 import json
 import math
 import os
 import secrets
 import shlex
 import socket
-import subprocess
+import subprocess  # nosec B404 - only starts the tracker the user installed
+import sys
 import time
 
 import FreeCAD as App
@@ -14,15 +15,19 @@ import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtNetwork, QtWidgets
 from pivy import coin
 
-import handnav_prefs
+from . import prefs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TRACKER_DIR = os.path.join(HERE, "tracker")
-VENV_OK = os.path.join(TRACKER_DIR, ".venv", ".handnav-ok")   # written by run_tracker.command
-HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")  # built by install.sh
+ICONS = os.path.join(HERE, "resources", "icons")
+# The tracker is a separate program that the user installs with tracker/install.sh.
+TRACKER_DIR = os.path.expanduser("~/Library/Application Support/HandNav")
+TRACKER_VERSION = "2"   # must match tracker/VERSION
+INSTALLER = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tracker", "install.sh")
+HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")
 TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker
-PARAMS = handnav_prefs.PARAMS
+PARAMS = prefs.PARAMS
 COMMAND = "HandNav_Toggle"
+COMMANDS = [COMMAND, "HandNav_Settings"]
 NAV_NAME = "HandNavNavigator"
 # FreeCAD.app points these into its own bundle; a child Python (and a Terminal started by
 # `open`, which inherits them) breaks if they leak out.
@@ -43,7 +48,7 @@ def _status(text):
     try:
         Gui.getMainWindow().statusBar().showMessage("HandNav: " + text, 4000)
     except Exception:
-        pass
+        pass  # nosec B110 - a nicety that must never get in the way
 
 
 def _set_button(checked):
@@ -54,16 +59,36 @@ def _set_button(checked):
         action.blockSignals(False)
 
 
-def _needs_setup():
-    """Same test as run_tracker.command: will the launcher (re)build the Python environment?"""
+def tracker_problem():
+    """Why the tracker cannot be started, or "" when it is installed and fits this addon."""
+    if sys.platform != "darwin":
+        return "HandNav works on macOS only."
+    if not os.access(os.path.join(TRACKER_DIR, ".venv", "bin", "python"), os.X_OK):
+        return "The HandNav tracker is not installed."
     try:
-        with open(os.path.join(TRACKER_DIR, "requirements.txt"), "rb") as f:
-            want = hashlib.sha256(f.read()).hexdigest()
-        with open(VENV_OK) as f:
-            have = f.read().strip()
+        with open(os.path.join(TRACKER_DIR, "VERSION")) as f:
+            version = f.read().strip()
     except OSError:
-        return True
-    return have != want or not os.access(os.path.join(TRACKER_DIR, ".venv", "bin", "python"), os.X_OK)
+        version = ""
+    return "" if version == TRACKER_VERSION else "The installed HandNav tracker does not fit this version."
+
+
+def install_command():
+    return "zsh " + shlex.quote(INSTALLER)
+
+
+def _secret():
+    """Shared secret of addon and tracker, readable by this user only; made on first use."""
+    path = os.path.join(TRACKER_DIR, "secret")
+    try:
+        with open(path) as f:
+            token = f.read().strip()
+    except OSError:
+        token = ""  # nosec B105 - none yet
+    if len(token) < 16:
+        token = secrets.token_hex(16)
+        _write_private("secret", token + "\n")
+    return token
 
 
 def _use_terminal():
@@ -109,9 +134,9 @@ class _PreviewLabel(QtWidgets.QLabel):
 class PreviewDock(QtWidgets.QDockWidget):
     """Camera preview and tracker status, shown inside the FreeCAD window."""
 
-    def __init__(self, parent, first_run, terminal, manual):
+    def __init__(self, parent, terminal, manual):
         super().__init__("HandNav", parent)
-        self._where = "its Terminal window" if terminal else "tracker.log in the addon's tracker folder"
+        self._where = "its Terminal window" if terminal else TRACKER_LOG
         self._tail = not terminal and not manual   # without a window, show what the tracker writes while it starts
         self._wall = time.time()
         self.setObjectName("HandNavDock")
@@ -120,14 +145,14 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.label.setWordWrap(True)
         self.label.setMinimumSize(160, 120)
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.guide = QtWidgets.QLabel(handnav_prefs.GUIDE)
+        self.guide = QtWidgets.QLabel(prefs.GUIDE)
         self.guide.setTextFormat(QtCore.Qt.RichText)
         self.guide.setAlignment(QtCore.Qt.AlignTop)
         self.guide_area = QtWidgets.QScrollArea()
         self.guide_area.setWidget(self.guide)
         self.guide_area.setWidgetResizable(True)
         self.guide_area.setMinimumHeight(120)
-        self.sliders = handnav_prefs.SensitivityPanel(lambda: settings_changed(restart=False, reload=False))
+        self.sliders = prefs.SensitivityPanel(lambda: settings_changed(restart=False, reload=False))
         self.sliders_area = QtWidgets.QScrollArea()
         self.sliders_area.setWidget(self.sliders)
         self.sliders_area.setWidgetResizable(True)
@@ -147,13 +172,18 @@ class PreviewDock(QtWidgets.QDockWidget):
         settings_button = QtWidgets.QToolButton()
         settings_button.setText("Settings…")
         settings_button.setToolTip("Open the HandNav settings")
-        settings_button.clicked.connect(lambda: Gui.showPreferences("HandNav", 0))
+        settings_button.clicked.connect(lambda: Gui.runCommand("HandNav_Settings", 0))
         buttons.addWidget(settings_button)
         buttons.addStretch()
         body = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(body)
         layout.setContentsMargins(2, 2, 2, 2)
+        self.copy_button = QtWidgets.QPushButton("Copy the install command")
+        self.copy_button.clicked.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(install_command()))
+        self.copy_button.hide()
         layout.addWidget(self.label, 3)
+        layout.addWidget(self.copy_button)
         layout.addLayout(buttons)
         layout.addWidget(self.guide_area, 2)
         layout.addWidget(self.sliders_area, 2)
@@ -162,16 +192,22 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.setWidget(body)
         self._started = time.monotonic()
         # how long the start may stay silent before the panel says so; never when the user starts it
-        self._patience = math.inf if manual else 300.0 if first_run else 20.0
+        self._patience = math.inf if manual else 20.0
         self._streaming = False   # preview frames have arrived
         self._last = 0.0      # time of the last packet from the tracker
         self._final = False   # the tracker said goodbye: keep its message on screen
-        self.set_text("Waiting for the tracker.\nRun tracker/run_tracker.command to start it." if manual else
-                      "First run: installing the hand tracker (about 300 MB).\n"
-                      "This can take a few minutes." if first_run else "Starting the tracker…")
+        self.set_text("Waiting for the tracker.\nRun run_tracker.command in\n%s" % TRACKER_DIR
+                      if manual else "Starting the tracker…")
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._check)
         self._timer.start(1000)
+
+    def show_missing(self, problem):
+        """The tracker has to be installed by the user: say how."""
+        self.set_text(problem + "\n\nIt is a separate program. To install it, run this command in Terminal, "
+                      "then switch HandNav off and on:\n\n" + install_command(), final=True)
+        self.label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.copy_button.show()
 
     def show_section(self, name):
         """Show one section ("guide", "sliders") under the picture, or none ("")."""
@@ -225,7 +261,7 @@ class Navigator(QtCore.QObject):
         self.sock = None
         self.dock = None
         self.port = 47800
-        self.token = ""
+        self.token = ""  # nosec B105 - none yet
         self._depth = None  # distance from the camera to the orbit pivot, along the view axis
         app = QtCore.QCoreApplication.instance()
         if app is not None:  # do not leave the camera on when FreeCAD quits
@@ -254,19 +290,26 @@ class Navigator(QtCore.QObject):
             return False
         sock.readyRead.connect(self._read)
         self.sock = sock
-        self.token = secrets.token_hex(8)
         self._depth = None
         auto = launch_tracker and p.GetBool("AutoStartTracker", True)
-        first_run = auto and _needs_setup()
+        problem = tracker_problem()
         if p.GetBool("EmbedPreview", True):
             mw = Gui.getMainWindow()
-            self.dock = PreviewDock(mw, first_run, _use_terminal(), not auto)
+            self.dock = PreviewDock(mw, _use_terminal(), not auto)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
             self.dock.show_section(p.GetString("PanelSection", ""))
+        if problem:
+            App.Console.PrintWarning("HandNav: %s Run in Terminal: %s\n" % (problem, install_command()))
+            if self.dock is not None:
+                self.dock.show_missing(problem)
+            else:
+                _status(problem)
+            return True
         try:
+            self.token = _secret()
             self._write_args()
             if auto:
-                self._launch(_use_terminal(), first_run)
+                self._launch(_use_terminal())
         except OSError as e:
             App.Console.PrintError("HandNav: could not start the tracker (%s)\n" % e)
             self.stop()
@@ -290,30 +333,31 @@ class Navigator(QtCore.QObject):
     def _write_args(self):
         """Tracker arguments, one per line: the launcher reads them without any shell evaluation."""
         p = _p()
-        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token-file", "session"]
+        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token-file", "secret"]
         if self.dock is not None:
             args.append("--embed")
-        args += handnav_prefs.tracker_args()
+        args += prefs.tracker_args()
         try:
             args += shlex.split(p.GetString("TrackerArgs", ""))
         except ValueError as e:
             App.Console.PrintWarning("HandNav: ignoring TrackerArgs (%s)\n" % e)
-        _write_private("session", self.token + "\n")
         _write_private("args", "".join(a.replace("\n", " ") + "\n" for a in args))
 
     def restart_tracker(self):
         """Start the tracker again with the current settings, keeping the panel as it is."""
-        if not self.running() or not _p().GetBool("AutoStartTracker", True):
+        if not self.running() or not self.token or not _p().GetBool("AutoStartTracker", True):
             return
         self._quit_tracker()
         if self.dock is not None:
             self.dock.set_text("Applying the settings…")
         self._write_args()
-        self._launch(_use_terminal(), _needs_setup())
+        self._launch(_use_terminal())
 
     def tune_tracker(self):
         """Hand the current thresholds to the running tracker."""
-        values = json.dumps(handnav_prefs.live_values())
+        if not self.token:
+            return
+        values = json.dumps(prefs.live_values())
         self._to_tracker(("set %s %s" % (self.token, values)).encode())
         try:
             self._write_args()   # for a tracker that is still starting, or started again by hand
@@ -321,7 +365,8 @@ class Navigator(QtCore.QObject):
             pass
 
     def _quit_tracker(self):
-        self._to_tracker(b"quit")
+        if self.token:
+            self._to_tracker(("quit " + self.token).encode())
 
     def _to_tracker(self, data):
         try:
@@ -331,7 +376,7 @@ class Navigator(QtCore.QObject):
         except OSError:
             pass
 
-    def _launch(self, terminal, first_run):
+    def _launch(self, terminal):
         """Start the tracker outside FreeCAD's process tree: FreeCAD.app has no camera permission
         entry, so macOS would refuse the camera to anything FreeCAD runs directly.
 
@@ -339,13 +384,12 @@ class Navigator(QtCore.QObject):
         itself. UseTerminal=true runs the launcher in a Terminal window instead."""
         env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
         if terminal:
-            # the first run installs for minutes: keep that window in front
-            cmd = ["open"] + ([] if first_run or self.dock is None else ["-g"]) + [
+            cmd = ["/usr/bin/open"] + (["-g"] if self.dock is not None else []) + [
                 "-a", "Terminal", os.path.join(TRACKER_DIR, "run_tracker.command")]
         else:
             # -n: a new instance even if the previous one is still shutting down; -g: stay in the background
-            cmd = ["open", "-n", "-g", HELPER_APP]
-        subprocess.Popen(cmd, env=env)
+            cmd = ["/usr/bin/open", "-n", "-g", HELPER_APP]
+        subprocess.Popen(cmd, env=env)  # nosec B603 - fixed program, no shell
 
     # --- packets ---------------------------------------------------------
     def _read(self):
@@ -360,11 +404,11 @@ class Navigator(QtCore.QObject):
         while self.sock is not None and self.sock.hasPendingDatagrams():
             try:
                 data = bytes(self.sock.receiveDatagram().data())
-                if data.startswith(tok) and data[len(tok):len(tok) + 2] == b"\xff\xd8":  # JPEG preview frame
+                if tok and data.startswith(tok) and data[len(tok):len(tok) + 2] == b"\xff\xd8":  # JPEG preview frame
                     frame, got = data[len(tok):], True
                     continue
                 m = json.loads(data)
-                if not isinstance(m, dict) or m.get("k") != self.token:
+                if not self.token or not isinstance(m, dict) or m.get("k") != self.token:
                     continue  # not from the tracker this session started
                 got = True
                 t = m.get("t")
@@ -447,7 +491,7 @@ class Navigator(QtCore.QObject):
                 if hit:
                     depth = (coin.SbVec3f(hit["x"], hit["y"], hit["z"]) - pos).dot(look)
             except Exception:
-                pass
+                pass  # nosec B110 - a nicety that must never get in the way
             if depth is None:
                 try:
                     act = coin.SoGetBoundingBoxAction(coin.SbViewportRegion())
@@ -456,7 +500,7 @@ class Navigator(QtCore.QObject):
                     if not box.isEmpty():
                         depth = (box.getCenter() - pos).dot(look)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - a nicety that must never get in the way
             if depth is None or not math.isfinite(depth) or (not ortho and depth <= 0):
                 depth = fallback   # a perspective camera cannot orbit a point behind itself
             self._depth = depth
@@ -517,7 +561,7 @@ class Navigator(QtCore.QObject):
             cam.position.setValue(pos)
 
         if zoom != 1.0 or push:
-            # pushing the fist towards the screen moves the model away, pulling brings it closer
+            # pushing the hand towards the screen moves the model away, pulling brings it closer
             away = push * p.GetFloat("PushGain", 2.0) * overall * (-1.0 if p.GetBool("InvertPush", False) else 1.0)
             k = min(max(zoom ** (p.GetFloat("ZoomGain", 1.5) * overall) * math.exp(away), 0.5), 2.0)
             if ortho:
@@ -554,10 +598,10 @@ def navigator():
 class ToggleCommand:
     def GetResources(self):
         return {"MenuText": "HandNav: hand gesture navigation",
-                "ToolTip": "Orbit, pan and zoom the 3D view with hand gestures seen by a webcam.\n"
-                           "Pinch: orbit, twist to roll. Fist: pan. Thumb + middle finger, up or down: zoom.\n"
+                "ToolTip": "Orbit, roll, pan and zoom the 3D view with hand gestures seen by a webcam.\n"
+                           "Pinch: orbit, twist to roll, push or pull to zoom. Fist: pan. Thumb + middle finger, up or down: zoom.\n"
                            "Raised fingers: standard views. Open hand: pause.",
-                "Pixmap": os.path.join(HERE, "handnav.svg"),
+                "Pixmap": os.path.join(ICONS, "HandNav.svg"),
                 "Checkable": False}
 
     def Activated(self, checked=0):
@@ -568,6 +612,19 @@ class ToggleCommand:
                 QtCore.QTimer.singleShot(0, lambda: _set_button(False))
         else:
             nav.stop()
+
+    def IsActive(self):
+        return True
+
+
+class SettingsCommand:
+    def GetResources(self):
+        return {"MenuText": "HandNav settings…",
+                "ToolTip": "Sensitivity, gestures, camera",
+                "Pixmap": "preferences-system"}
+
+    def Activated(self, index=0):
+        Gui.showPreferences("HandNav", 0)
 
     def IsActive(self):
         return True
@@ -594,9 +651,28 @@ def settings_changed(restart=False, reload=True):
         _nav.dock.sliders.load()
 
 
-def setup():
+_registered = False
+
+
+def register():
+    """Commands and preference pages; called when the workbench is first used."""
+    global _registered
+    if _registered:
+        return
+    _registered = True
     Gui.addCommand(COMMAND, ToggleCommand())
-    Gui.addWorkbenchManipulator(_Manipulator())
-    Gui.addIconPath(HERE)   # the group's icon is looked up as preferences-handnav
-    Gui.addPreferencePage(handnav_prefs.SettingsPage, "HandNav")
-    Gui.addPreferencePage(handnav_prefs.GuidePage, "HandNav")
+    Gui.addCommand("HandNav_Settings", SettingsCommand())
+    Gui.addIconPath(ICONS)   # the group's icon is looked up as preferences-handnav
+    Gui.addPreferencePage(prefs.SettingsPage, "HandNav")
+    Gui.addPreferencePage(prefs.GuidePage, "HandNav")
+
+
+_manipulator = None
+
+
+def show_in_all_workbenches():
+    """Only when the user asked for it: the button on the View toolbar of every workbench."""
+    global _manipulator
+    if _manipulator is None:
+        _manipulator = _Manipulator()
+        Gui.addWorkbenchManipulator(_manipulator)

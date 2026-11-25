@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """HandNav settings: one table of parameters, the preference pages built from it, the gesture guide."""
 import json
 import math
@@ -14,6 +15,8 @@ SPEC = [
          "Twisting the hand while pinching rotates the view in the plane of the screen."),
         ("EnablePush", "bool", True, "Zoom by pushing or pulling the fist",
          "Judged from the apparent size of the hand, so it is coarse. Switch it off if panning zooms by accident."),
+        ("EnablePinchPush", "bool", True, "Zoom by pushing or pulling the pinch",
+         "Like the fist, while pinching. Switch it off if orbiting zooms by accident."),
         ("EnableSqueeze", "bool", True, "Fit all by squeezing the fist twice",
          "Two quick squeezes in place."),
         ("ViewGestures", "bool", True, "Standard views by raised fingers",
@@ -29,11 +32,11 @@ SPEC = [
         ("RollGain", "float", 1.0, "Roll speed", "1 turns the view exactly as much as the hand.", 0.2, 5.0, 0.1),
         ("PanGain", "float", 1.5, "Pan speed", "How far the view moves for a hand movement.", 0.2, 6.0, 0.1),
         ("ZoomGain", "float", 1.5, "Zoom speed", "Thumb + middle finger (and two-hand) zoom.", 0.2, 6.0, 0.1),
-        ("PushGain", "float", 2.0, "Fist zoom speed", "Zoom by pushing or pulling the fist.", 0.2, 8.0, 0.2),
+        ("PushGain", "float", 2.0, "Push zoom speed", "Zoom by pushing or pulling the fist or the pinch.", 0.2, 8.0, 0.2),
         ("InvertX", "bool", False, "Reverse orbit left / right", ""),
         ("InvertY", "bool", False, "Reverse orbit up / down", ""),
         ("InvertRoll", "bool", False, "Reverse roll", ""),
-        ("InvertPush", "bool", False, "Reverse fist zoom", ""),
+        ("InvertPush", "bool", False, "Reverse push zoom", ""),
     ]),
     ("Recognition", [
         ("MinHandSize", "float", 0.12, "Smallest hand",
@@ -45,8 +48,8 @@ SPEC = [
          "Smaller needs a tighter fist, larger triggers more easily.", 0.60, 1.20, 0.02),
         ("TwistStart", "float", 9.0, "Twist before roll starts (°)",
          "Smaller starts to roll more easily, larger keeps orbiting cleaner.", 2.0, 30.0, 1.0),
-        ("PushStart", "float", 10.0, "Size change before fist zoom starts (%)",
-         "Smaller starts to zoom more easily, larger keeps panning cleaner.", 3.0, 40.0, 1.0),
+        ("PushStart", "float", 10.0, "Size change before push zoom starts (%)",
+         "Smaller starts to zoom more easily, larger keeps panning and orbiting cleaner.", 3.0, 40.0, 1.0),
         ("ViewHold", "float", 0.3, "Hold time for views (s)",
          "How long raised fingers must be held still.", 0.1, 2.0, 0.05),
         ("Smooth", "float", 0.5, "Responsiveness",
@@ -59,6 +62,8 @@ SPEC = [
         ("CameraName", "camera", "", "Camera", "Which camera to use."),
         ("EmbedPreview", "bool", True, "Show the camera in a FreeCAD panel",
          "Otherwise a separate window opens. Applies the next time HandNav is switched on."),
+        ("ShowInAllWorkbenches", "bool", False, "Show the HandNav button in every workbench",
+         "Adds it to the View toolbar and the View menu. Applies after a restart of FreeCAD."),
         ("UseTerminal", "bool", False, "Run the tracker in a Terminal window",
          "For troubleshooting. Applies the next time HandNav is switched on."),
     ]),
@@ -70,9 +75,9 @@ LIVE = {"MinHandSize": "min_hand", "Pinch": "pinch", "Fist": "fist", "TwistStart
 SLIDERS = [
     ("Speed", [("Sensitivity", "Overall", True, False), ("OrbitGain", "Orbit", True, False),
                ("RollGain", "Roll", True, False), ("PanGain", "Pan", True, False),
-               ("ZoomGain", "Zoom", True, False), ("PushGain", "Fist zoom", True, False)]),
+               ("ZoomGain", "Zoom", True, False), ("PushGain", "Push zoom", True, False)]),
     ("How easily it starts", [("Pinch", "Pinch", False, False), ("Fist", "Fist", False, False),
-                              ("TwistStart", "Roll", True, True), ("PushStart", "Fist zoom", True, True),
+                              ("TwistStart", "Roll", True, True), ("PushStart", "Push zoom", True, True),
                               ("ViewHold", "Finger views", True, True),
                               ("MinHandSize", "Distant hand", False, True),
                               ("Smooth", "Response", False, False)]),
@@ -88,7 +93,7 @@ GUIDE = """
 <tr><td>Pinch, twist the hand</td><td>Roll in the screen plane</td></tr>
 <tr><td>Fist, move</td><td>Pan</td></tr>
 <tr><td>Thumb + middle finger, others up;<br>hand up / down</td><td>Zoom in / out</td></tr>
-<tr><td>Fist, pull back / push to the camera</td><td>Zoom in / out (coarse)</td></tr>
+<tr><td>Fist or pinch, pull back / push to the camera</td><td>Zoom in / out (coarse)</td></tr>
 <tr><td>Open hand</td><td>Pause</td></tr>
 <tr><td colspan="2"><b>Fit all</b></td></tr>
 <tr><td>Squeeze the fist twice, quickly</td><td>Fit all</td></tr>
@@ -150,6 +155,7 @@ def tracker_args(live=True):
     if get("CameraName").strip():
         args += ["--camera-name", get("CameraName").strip()]
     for name, option, when in (("EnableRoll", "--no-roll", False), ("EnablePush", "--no-push", False),
+                               ("EnablePinchPush", "--no-pinch-push", False),
                                ("EnableSqueeze", "--no-squeeze", False), ("TwoHands", "--two-hands", True)):
         if get(name) == when:
             args.append(option)
@@ -261,8 +267,9 @@ class SettingsPage:
         before = tracker_args(live=False)
         for name in DEFAULTS:
             put(name, self._value(name))
-        import handnav_gui
-        handnav_gui.settings_changed(restart=tracker_args(live=False) != before)
+        from . import gui
+
+        gui.settings_changed(restart=tracker_args(live=False) != before)
 
 
 class SensitivityPanel(QtWidgets.QWidget):
