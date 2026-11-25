@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.0 (2026-11-25)
+
+- Acceleration: fast movements go further, slow ones are finer. Run the tracker's installer again after the update; the panel shows the command.
+
 ## 0.9.1 (2026-11-25)
 
 - The tracker's installer prepares the libraries, so the first start no longer takes up to a minute.

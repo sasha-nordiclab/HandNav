@@ -409,6 +409,50 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(feed(g, [[]] * 20), [{"t": "mode", "m": "idle"}])
 
 
+class AccelerationTest(unittest.TestCase):
+    def _orbit(self, accel, seconds, fps=30, kind="pinch"):
+        """Move the hand 0.4 to the right in the given time; returns the distance sent."""
+        g, t, pk, n = ht.Gestures(accel=accel), 0.0, [], int(seconds * fps)
+        path = [0.3] * 5 + [0.3 + 0.4 * i / n for i in range(n + 1)] + [0.7] * 15
+        for x in path:
+            t += 1 / fps
+            pk += g.update([hand(x, 0.5, kind)], t)
+        return sum(p.get("dx", 0) for p in pk)
+
+    def test_fast_goes_further_than_slow(self):
+        for kind in ("pinch", "fist"):
+            slow, fast = self._orbit(0.5, 3.0, kind=kind), self._orbit(0.5, 0.35, kind=kind)
+            self.assertLess(slow, 0.33, kind)
+            self.assertGreater(fast, 0.45, kind)
+
+    def test_off_means_the_same_distance(self):
+        self.assertAlmostEqual(self._orbit(0, 3.0), self._orbit(0, 0.35), 2)
+        self.assertAlmostEqual(self._orbit(0, 1.0), 0.4, 2)
+
+    def test_stronger_setting_accelerates_more(self):
+        self.assertLess(self._orbit(0.3, 0.35), self._orbit(0.9, 0.35))
+
+    def test_frame_rate_does_not_matter_much(self):
+        a, b = self._orbit(0.5, 0.6, fps=30), self._orbit(0.5, 0.6, fps=15)
+        self.assertLess(abs(a - b) / a, 0.2)
+
+    def test_factor_is_limited_and_neutral_at_the_usual_speed(self):
+        s = ht.Speed(usual=0.5)
+        for v, want in ((0.5, 1.0), (1000.0, s.HIGH), (1e-9, s.LOW)):
+            s.value = v
+            self.assertAlmostEqual(s.factor(0.5), want)
+        s.value = None
+        self.assertEqual(s.factor(0), 1.0)
+
+    def test_fast_twist_rolls_further(self):
+        def roll(step):
+            g, n = ht.Gestures(accel=0.6), int(60 / step)
+            pk = feed(g, [[turned(hand(0.5, 0.5, "pinch"), step * i)] for i in range(n + 1)]
+                      + [[turned(hand(0.5, 0.5, "pinch"), 60)]] * 10)
+            return sum(p["a"] for p in pk if p["t"] == "roll")
+        self.assertGreater(roll(6), 1.3 * roll(1.5))
+
+
 class TuneTest(unittest.TestCase):
     def test_thresholds_change_while_running(self):
         g = ht.Gestures()

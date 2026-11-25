@@ -66,6 +66,7 @@ The addon itself installs, downloads and compiles nothing. To remove the tracker
 ## Sensitivity and settings
 
 - **Sensitivity** in the panel opens sliders that act while you move your hand: the speed of every motion, and how easily every gesture starts. To the right is always more sensitive.
+- **Acceleration**, one of the sliders, works like that of a mouse: fast movements go further, slow ones are finer. All the way to the left switches it off.
 - **Gestures** in the panel shows the list of gestures.
 - **Settings…** (or FreeCAD's preferences, page HandNav, once the workbench has been opened) has everything else: gestures on or off, directions, camera. Every setting explains itself in a tooltip.
 

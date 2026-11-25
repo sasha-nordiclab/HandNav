@@ -170,6 +170,25 @@ class HandPicker:
         return [best]
 
 
+class Speed:
+    """Smoothed speed, and the acceleration that follows from it: slow is finer, fast goes further."""
+
+    LOW, HIGH = 0.5, 3.0
+
+    def __init__(self, usual):
+        self.usual = usual      # at this speed nothing changes
+        self.value = None
+
+    def update(self, distance, dt):
+        v = distance / dt
+        self.value = v if self.value is None else self.value + (1 - math.exp(-dt / 0.06)) * (v - self.value)
+
+    def factor(self, accel):
+        if accel <= 0 or not self.value:
+            return 1.0 if accel <= 0 else self.LOW
+        return min(max((self.value / self.usual) ** accel, self.LOW), self.HIGH)
+
+
 class Axis:
     """A secondary motion (twist, push) that only engages on a deliberate movement, so that plain
     orbiting or panning does not leak into it, and lets go again when the movement ends."""
@@ -182,6 +201,7 @@ class Axis:
     def reset(self, value):
         self._raw, self._acc, self._s, self._ref = value, 0.0, 0.0, 0.0
         self._recent, self.active = [], False
+        self.moved = 0.0
 
     def update(self, value):
         """Returns the change to apply for this frame (0.0 while not engaged)."""
@@ -196,6 +216,7 @@ class Axis:
             self.reset(value)
             return 0.0
         self._acc += d
+        self.moved = abs(self.smooth * (self._acc - self._s))   # in this frame
         self._s += self.smooth * (self._acc - self._s)
         self._recent = (self._recent + [self._s])[-12:]
         if not self.active:
@@ -218,7 +239,11 @@ class Gestures:
 
     def __init__(self, pinch_on=0.30, pinch_off=None, fist_on=0.90, fist_off=None,
                  smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3,
-                 roll=True, push=True, squeeze=True, pinch_push=True):
+                 roll=True, push=True, squeeze=True, pinch_push=True, accel=0.0):
+        self.accel = min(max(accel, 0.0), 1.0)
+        self._speed = Speed(usual=0.35)       # picture heights per second
+        self._turn_speed = Speed(usual=1.0)   # radians per second
+        self._dt = 1 / 30
         self.use_pinch_push = pinch_push
         self.use_roll, self.use_push, self.use_squeeze = roll, push, squeeze
         self.pinch_on = pinch_on
@@ -262,7 +287,8 @@ class Gestures:
             self.pinch_on, self.pinch_off = pinch, pinch * 1.5
         if fist is not None:
             self.fist_on, self.fist_off = fist, fist * 1.15
-        smooth, hold = num("smooth", 0.05, 1.0), num("view_hold", 0.1, 3.0)
+        smooth, hold, accel = num("smooth", 0.05, 1.0), num("view_hold", 0.1, 3.0), num("accel", 0.0, 1.0)
+        self.accel = self.accel if accel is None else accel
         self.smooth = self.smooth if smooth is None else smooth
         self.view_hold = self.view_hold if hold is None else hold
         twist, push = num("twist_start", 1.0, 90.0), num("push_start", 1.0, 100.0)
@@ -313,7 +339,8 @@ class Gestures:
     def update(self, hands_pts, now=None):
         """hands_pts: list of 21-point hands, now: seconds (default: 30 frames per second).
         Returns the list of packets (dicts) to send."""
-        self._now = self._now + 1 / 30 if now is None else now
+        before, self._now = self._now, self._now + 1 / 30 if now is None else now
+        self._dt = min(max(self._now - before, 1 / 120), 0.2)
         hands = self.classify_hands(hands_pts)
         view = self._view(hands, hands_pts)
         if view:
@@ -381,7 +408,7 @@ class Gestures:
             pass
         elif self.mode == "orbit":
             twist, size = aux
-            d = self._twist.update(twist) if self.use_roll else 0.0
+            d = self._roll(self._twist, twist) if self.use_roll else 0.0
             if d:
                 extra = [{"t": "roll", "a": d}]
             if self._twist.active:
@@ -401,7 +428,7 @@ class Gestures:
             if d:
                 extra = [{"t": "depth", "d": d}]
         else:
-            d = self._wheel.update(aux)
+            d = self._roll(self._wheel, aux)
             if d:
                 extra = [{"t": "roll", "a": d}]
         return self._move(val) + extra
@@ -461,7 +488,13 @@ class Gestures:
         self._pose_done = True
         return [{"t": "view", "v": pose}]
 
+    def _roll(self, axis, angle):
+        d = axis.update(angle)
+        self._turn_speed.update(axis.moved, self._dt)
+        return d * self._turn_speed.factor(self.accel)
+
     def _reset_axes(self):
+        self._speed.value = self._turn_speed.value = None
         for axis in (self._twist, self._wheel, self._push):
             axis.reset(None)
 
@@ -484,7 +517,9 @@ class Gestures:
 
     def _move(self, val):
         a = self.smooth
+        was = self._s
         self._s = (self._s[0] + a * (val[0] - self._s[0]), self._s[1] + a * (val[1] - self._s[1]))
+        self._speed.update(_d(self._s, was), self._dt)
         dx, dy = self._s[0] - self._prev[0], self._s[1] - self._prev[1]
         if math.hypot(dx, dy) < self.deadzone:
             return []
@@ -492,7 +527,9 @@ class Gestures:
         if self.mode == "zoom":
             if prev[0] < 1e-3 or self._s[0] < 1e-3:
                 return []
-            return [{"t": "zoom", "k2": prev[0] / self._s[0]}]
+            return [{"t": "zoom", "k2": prev[0] / self._s[0]}]   # two hands: 1:1, without acceleration
+        f = self._speed.factor(self.accel)
+        dx, dy = dx * f, dy * f
         if self.mode == "lift":   # hand up: zoom in
             return [{"t": "zoom", "k2": math.exp(self.LIFT_GAIN * dy)}] if dy else []
         return [{"t": self.mode, "dx": dx, "dy": -dy}]
@@ -659,6 +696,7 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="no zoom by pushing or pulling the fist")
     ap.add_argument("--no-pinch-push", action="store_true", help="no zoom by pushing or pulling the pinch")
     ap.add_argument("--no-squeeze", action="store_true", help="no fit all by squeezing twice")
+    ap.add_argument("--accel", type=float, default=0.5, help="acceleration 0..1: fast movements go further, slow ones are finer (0 = off)")
     ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
     ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before push zoom starts")
     ap.add_argument("--min-hand", type=float, default=0.12,
@@ -855,7 +893,7 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
     starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold,
                  roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze,
-                 pinch_push=not args.no_pinch_push)
+                 pinch_push=not args.no_pinch_push, accel=args.accel)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     g.tune({"twist_start": args.twist_start, "push_start": args.push_start})
     picker, had = HandPicker(), False

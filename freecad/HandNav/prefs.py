@@ -28,6 +28,9 @@ SPEC = [
     ]),
     ("Speed and direction", [
         ("Sensitivity", "float", 1.0, "Overall sensitivity", "Multiplies all the speeds below.", 0.2, 4.0, 0.1),
+        ("Acceleration", "float", 0.5, "Acceleration",
+         "Fast movements go further, slow ones are finer: orbit, roll, pan and zoom up / down. 0 switches it off.",
+         0.0, 1.0, 0.1),
         ("OrbitGain", "float", 4.0, "Orbit speed", "How far the view turns for a hand movement.", 0.5, 15.0, 0.5),
         ("RollGain", "float", 1.0, "Roll speed", "1 turns the view exactly as much as the hand.", 0.2, 5.0, 0.1),
         ("PanGain", "float", 1.5, "Pan speed", "How far the view moves for a hand movement.", 0.2, 6.0, 0.1),
@@ -70,10 +73,11 @@ SPEC = [
 ]
 # thresholds that a running tracker takes over at once: parameter -> name in the tracker
 LIVE = {"MinHandSize": "min_hand", "Pinch": "pinch", "Fist": "fist", "TwistStart": "twist_start",
-        "PushStart": "push_start", "ViewHold": "view_hold", "Smooth": "smooth"}
+        "PushStart": "push_start", "ViewHold": "view_hold", "Smooth": "smooth", "Acceleration": "accel"}
 # sliders of the panel: (title, [(parameter, label, logarithmic, right end is the smaller value)])
 SLIDERS = [
-    ("Speed", [("Sensitivity", "Overall", True, False), ("OrbitGain", "Orbit", True, False),
+    ("Speed", [("Sensitivity", "Overall", True, False),
+               ("Acceleration", "Acceleration", False, False), ("OrbitGain", "Orbit", True, False),
                ("RollGain", "Roll", True, False), ("PanGain", "Pan", True, False),
                ("ZoomGain", "Zoom", True, False), ("PushGain", "Push zoom", True, False)]),
     ("How easily it starts", [("Pinch", "Pinch", False, False), ("Fist", "Fist", False, False),
