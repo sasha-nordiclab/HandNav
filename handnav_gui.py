@@ -14,12 +14,14 @@ import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtNetwork, QtWidgets
 from pivy import coin
 
+import handnav_prefs
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACKER_DIR = os.path.join(HERE, "tracker")
 VENV_OK = os.path.join(TRACKER_DIR, ".venv", ".handnav-ok")   # written by run_tracker.command
 HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")  # built by install.sh
 TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker
-PARAMS = "User parameter:BaseApp/Preferences/Mod/HandNav"
+PARAMS = handnav_prefs.PARAMS
 COMMAND = "HandNav_Toggle"
 NAV_NAME = "HandNavNavigator"
 # FreeCAD.app points these into its own bundle; a child Python (and a Terminal started by
@@ -118,7 +120,35 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.label.setWordWrap(True)
         self.label.setMinimumSize(160, 120)
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.setWidget(self.label)
+        self.guide = QtWidgets.QLabel(handnav_prefs.GUIDE)
+        self.guide.setTextFormat(QtCore.Qt.RichText)
+        self.guide.setAlignment(QtCore.Qt.AlignTop)
+        self.guide_area = QtWidgets.QScrollArea()
+        self.guide_area.setWidget(self.guide)
+        self.guide_area.setWidgetResizable(True)
+        self.guide_area.setMinimumHeight(120)
+        self.guide_area.setVisible(_p().GetBool("ShowGuide", False))
+        guide_button = QtWidgets.QToolButton()
+        guide_button.setText("Gestures")
+        guide_button.setToolTip("Show or hide the list of gestures")
+        guide_button.setCheckable(True)
+        guide_button.setChecked(_p().GetBool("ShowGuide", False))
+        guide_button.toggled.connect(self._toggle_guide)
+        settings_button = QtWidgets.QToolButton()
+        settings_button.setText("Settings…")
+        settings_button.setToolTip("Open the HandNav settings")
+        settings_button.clicked.connect(lambda: Gui.showPreferences("HandNav", 0))
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addWidget(guide_button)
+        buttons.addWidget(settings_button)
+        buttons.addStretch()
+        body = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.addWidget(self.label, 3)
+        layout.addLayout(buttons)
+        layout.addWidget(self.guide_area, 2)
+        self.setWidget(body)
         self._started = time.monotonic()
         # how long the start may stay silent before the panel says so; never when the user starts it
         self._patience = math.inf if manual else 300.0 if first_run else 20.0
@@ -131,6 +161,12 @@ class PreviewDock(QtWidgets.QDockWidget):
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._check)
         self._timer.start(1000)
+
+    def _toggle_guide(self, on):
+        self.guide_area.setVisible(on)
+        _p().SetBool("ShowGuide", on)
+        if not self.isFloating():
+            Gui.getMainWindow().resizeDocks([self], [520 if on else 270], QtCore.Qt.Vertical)
 
     def alive(self):
         self._last = time.monotonic()
@@ -208,7 +244,7 @@ class Navigator(QtCore.QObject):
             mw = Gui.getMainWindow()
             self.dock = PreviewDock(mw, first_run, _use_terminal(), not auto)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
-            mw.resizeDocks([self.dock], [270], QtCore.Qt.Vertical)
+            mw.resizeDocks([self.dock], [520 if p.GetBool("ShowGuide", False) else 270], QtCore.Qt.Vertical)
         try:
             self._write_args()
             if auto:
@@ -223,12 +259,7 @@ class Navigator(QtCore.QObject):
     def stop(self):
         if not self.running():
             return
-        try:  # ask the tracker to exit; it also exits by itself once this port is closed
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(b"quit", ("127.0.0.1", self.port + 1))
-            s.close()
-        except OSError:
-            pass
+        self._quit_tracker()   # it also exits by itself once this port is closed
         self.sock.close()
         self.sock.deleteLater()
         self.sock = None
@@ -242,20 +273,33 @@ class Navigator(QtCore.QObject):
         """Tracker arguments, one per line: the launcher reads them without any shell evaluation."""
         p = _p()
         args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token-file", "session"]
-        name = p.GetString("CameraName", "").strip()
-        if name:
-            args += ["--camera-name", name]
         if self.dock is not None:
             args.append("--embed")
-        args += ["--min-hand", "%.3f" % min(max(p.GetFloat("MinHandSize", 0.12), 0.0), 1.0)]
-        if p.GetBool("TwoHands", False):
-            args.append("--two-hands")
+        args += handnav_prefs.tracker_args()
         try:
             args += shlex.split(p.GetString("TrackerArgs", ""))
         except ValueError as e:
             App.Console.PrintWarning("HandNav: ignoring TrackerArgs (%s)\n" % e)
         _write_private("session", self.token + "\n")
         _write_private("args", "".join(a.replace("\n", " ") + "\n" for a in args))
+
+    def restart_tracker(self):
+        """Start the tracker again with the current settings, keeping the panel as it is."""
+        if not self.running() or not _p().GetBool("AutoStartTracker", True):
+            return
+        self._quit_tracker()
+        if self.dock is not None:
+            self.dock.set_text("Applying the settings…")
+        self._write_args()
+        self._launch(_use_terminal(), _needs_setup())
+
+    def _quit_tracker(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.sendto(b"quit", ("127.0.0.1", self.port + 1))
+            s.close()
+        except OSError:
+            pass
 
     def _launch(self, terminal, first_run):
         """Start the tracker outside FreeCAD's process tree: FreeCAD.app has no camera permission
@@ -507,6 +551,15 @@ class _Manipulator:
         return [{"insert": COMMAND, "menuItem": "Std_ViewDockUndockFullscreen", "after": ""}]
 
 
+def settings_changed():
+    """Called by the preference page when a setting of the tracker changed."""
+    if _nav is not None and _nav.running():
+        _nav.restart_tracker()
+
+
 def setup():
     Gui.addCommand(COMMAND, ToggleCommand())
     Gui.addWorkbenchManipulator(_Manipulator())
+    Gui.addIconPath(HERE)   # the group's icon is looked up as preferences-handnav
+    Gui.addPreferencePage(handnav_prefs.SettingsPage, "HandNav")
+    Gui.addPreferencePage(handnav_prefs.GuidePage, "HandNav")

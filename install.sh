@@ -29,7 +29,7 @@ put() {
   cp "$SRC/$1" "$DST/$1.new.$$"
   mv -f "$DST/$1.new.$$" "$DST/$1"
 }
-for f in InitGui.py handnav_gui.py handnav.svg package.xml LICENSE README.md \
+for f in InitGui.py handnav_gui.py handnav_prefs.py handnav.svg preferences-handnav.svg package.xml LICENSE README.md \
          tracker/hand_tracker.py tracker/run_tracker.command tracker/requirements.txt \
          tracker/helper.c tracker/Info.plist; do
   put "$f"

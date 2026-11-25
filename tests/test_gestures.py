@@ -382,6 +382,20 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(feed(g, [[]] * 20), [{"t": "mode", "m": "idle"}])
 
 
+class SwitchedOffTest(unittest.TestCase):
+    def test_roll(self):
+        pk = feed(ht.Gestures(roll=False), [[turned(hand(0.5, 0.5, "pinch"), 2 * i)] for i in range(30)])
+        self.assertNotIn("roll", kinds(pk))
+
+    def test_push(self):
+        pk = feed(ht.Gestures(push=False), [[scaled(hand(0.5, 0.5, "fist"), 1 + 0.02 * i)] for i in range(25)])
+        self.assertNotIn("depth", kinds(pk))
+
+    def test_squeeze(self):
+        f, o = SqueezeTest.FIST, SqueezeTest.OPEN
+        self.assertNotIn("view", kinds(feed(ht.Gestures(squeeze=False), o * 5 + f * 6 + o * 5 + f * 6 + o * 20)))
+
+
 class SqueezeTest(unittest.TestCase):
     FIST, OPEN = [[hand(0.5, 0.5, "fist")]], [[hand(0.5, 0.5, "open")]]
 

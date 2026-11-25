@@ -71,7 +71,11 @@ The tracker runs under the helper app rather than inside FreeCAD because FreeCAD
 
 ## Settings
 
-Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entry with the given type if it is missing. Camera and tracker settings apply the next time HandNav is switched on; gains apply immediately.
+Edit → Preferences → HandNav (on macOS also FreeCAD → Settings), or the **Settings…** button in the HandNav panel. Every setting has an explanation as a tooltip; the second page explains the gestures. The **Gestures** button in the panel shows the list of gestures under the camera picture.
+
+Changes to gestures and recognition restart the tracker at once if HandNav is on; speeds and directions apply immediately.
+
+The same settings as parameters, for Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav` (`Camera`, `AutoStartTracker`, `TrackerArgs` and `Port` exist only there; they apply the next time HandNav is switched on):
 
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
@@ -87,11 +91,13 @@ Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entr
 | `InvertRoll`, `InvertPush` | Boolean | `false` | Reverse the roll or the fist zoom. |
 | `MinHandSize` | Float | `0.12` | Ignore hands whose palm is smaller than this part of the picture height, i.e. too far from the camera. `0` switches the limit off. |
 | `TwoHands` | Boolean | `false` | Track two hands and enable the two-hand gestures. |
+| `EnableRoll`, `EnablePush`, `EnableSqueeze` | Boolean | `true` | Roll by twisting, zoom with the fist, fit all by squeezing twice. |
+| `Pinch`, `Fist`, `ViewHold`, `Smooth`, `Confidence` | Float | `0.30`, `0.90`, `0.3`, `0.5`, `0.4` | Recognition thresholds; see the tracker options below. |
 | `ViewGestures` | Boolean | `true` | React to raised fingers with standard views. |
 | `InvertX`, `InvertY` | Boolean | `false` | Reverse the orbit direction. |
 | `UseTerminal` | Boolean | `false` | Run the tracker in a Terminal window instead of the helper app. Terminal then needs the camera permission. |
 | `AutoStartTracker` | Boolean | `true` | Start the tracker with the button. With `false`, switch HandNav on first and then run `tracker/run_tracker.command` from the installed addon folder yourself. |
-| `TrackerArgs` | String | empty | Extra tracker options, e.g. `--pinch 0.25 --smooth 0.4`. |
+| `TrackerArgs` | String | empty | Extra tracker options, e.g. `--width 640`. They override the settings. |
 | `Port` | Integer | `47800` | UDP port on 127.0.0.1. The tracker also listens on the next port for the stop signal. |
 
 The tracker lists the cameras it sees, with their indexes, in `tracker/tracker.log` in the installed addon folder.
@@ -105,7 +111,7 @@ Tracker options (`tracker/hand_tracker.py --help`):
 - `--width` (default 960): width of the analysed picture. Larger helps when the hand is far away, smaller is faster.
 - `--view-hold` (default 0.3): how many seconds raised fingers must be held still for a standard view.
 
-The gesture thresholds are first estimates: tune `--pinch` and `--fist` if a gesture triggers too easily or not at all.
+The gesture thresholds are first estimates: tune Pinch distance and Fist tightness in the settings if a gesture triggers too easily or not at all.
 
 ## How it works
 
@@ -118,6 +124,7 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNa
 
 - `tracker/hand_tracker.py` classifies each hand as pinch, fist or open, debounces mode changes, smooths the motion and sends deltas in units of frame height.
 - `handnav_gui.py` listens on a `QUdpSocket`, accumulates the packets that arrived since the last event-loop pass and applies them to the view camera. It never touches the document.
+- `handnav_prefs.py` holds the table of settings, the preference pages built from it and the gesture guide.
 - `InitGui.py` registers the toggle command and adds it to the View toolbar and the View menu.
 - The tracker sends over a connected UDP socket, so it notices as soon as FreeCAD stops listening and exits. A tracker left over from an earlier start is told to quit by the next one.
 - `HandNavTracker.app` (built from `tracker/helper.c` and `tracker/Info.plist`) has no window or Dock icon. It starts `run_tracker.command` as its child so that macOS attributes the camera to it, and writes the output to `tracker/tracker.log`.
@@ -132,9 +139,9 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNa
 - **A Terminal window opens.** The helper app was not built. Install the Command Line Tools and run `./install.sh` again, and check that `UseTerminal` is not set.
 - **Wrong camera.** Set `Camera` or `CameraName` (see Settings) and switch HandNav off and on.
 - **"Port … is busy".** HandNav is already on in another FreeCAD window, or another program uses the port. Set a different `Port`.
-- **The hand is lost near the face or against a busy background.** A gesture survives a loss of up to 0.25 s, and detections that do not look like a hand are dropped. If it still gets lost, lower `--confidence`, add light from the front, and hold the hand beside the face rather than in front of it. Every 10 s `tracker.log` records the frame rate and how often the hand was lost.
+- **The hand is lost near the face or against a busy background.** A gesture survives a loss of up to 0.25 s, and detections that do not look like a hand are dropped. If it still gets lost, lower Detection confidence, add light from the front, and hold the hand beside the face rather than in front of it. Every 10 s `tracker.log` records the frame rate and how often the hand was lost.
 - **"TOO SMALL" over the picture.** The hand is too far from the camera. The numbers are its size and the limit; change the limit with `MinHandSize`. A running gesture continues down to 75 % of it.
-- **Gestures trigger too easily or not at all.** Tune `--pinch` and `--fist` through `TrackerArgs`, and keep the whole hand in the frame with reasonable light.
+- **Gestures trigger too easily or not at all.** Tune Pinch distance and Fist tightness in the settings, and keep the whole hand in the frame with reasonable light.
 
 ## Limitations
 

@@ -215,7 +215,9 @@ class Gestures:
     """Turns per-frame hand landmarks into debounced, smoothed motion packets."""
 
     def __init__(self, pinch_on=0.30, pinch_off=None, fist_on=0.90, fist_off=None,
-                 smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3):
+                 smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3,
+                 roll=True, push=True, squeeze=True):
+        self.use_roll, self.use_push, self.use_squeeze = roll, push, squeeze
         self.pinch_on = pinch_on
         self.pinch_off = pinch_on * 1.5 if pinch_off is None else pinch_off
         self.fist_on = fist_on
@@ -291,7 +293,7 @@ class Gestures:
         view = self._view(hands, hands_pts)
         if view:
             return view
-        return self._motion(hands, hands_pts) + ([{"t": "view", "v": "fit"}] if self._squeeze(hands) else [])
+        return self._motion(hands, hands_pts) + ([{"t": "view", "v": "fit"}] if self.use_squeeze and self._squeeze(hands) else [])
 
     def _motion(self, hands, hands_pts):
         if not hands_pts and self.mode not in ("idle", "zoom"):
@@ -351,6 +353,8 @@ class Gestures:
         self._raw = val
         extra = []
         if self.mode == "lift":
+            pass
+        elif not (self.use_push if self.mode == "pan" else self.use_roll):
             pass
         elif self.mode == "pan":
             d = self._push.update(aux)
@@ -599,6 +603,9 @@ def main():
     ap.add_argument("--pinch", type=float, default=0.30, help="pinch threshold (smaller = stricter)")
     ap.add_argument("--fist", type=float, default=0.90, help="fist threshold (smaller = tighter fist needed)")
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
+    ap.add_argument("--no-roll", action="store_true", help="no roll by twisting")
+    ap.add_argument("--no-push", action="store_true", help="no zoom by pushing or pulling the fist")
+    ap.add_argument("--no-squeeze", action="store_true", help="no fit all by squeezing twice")
     ap.add_argument("--min-hand", type=float, default=0.12,
                     help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
     ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
@@ -783,7 +790,8 @@ def run(args, link, stop, should_stop, say, finish, starting):
             time.sleep(0.25)
 
     starting.clear()   # from here on the capture loop itself checks for a stop
-    g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold)
+    g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold,
+                 roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     picker, had = HandPicker(), False
     stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0,
