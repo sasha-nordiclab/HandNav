@@ -6,8 +6,9 @@ Gestures
   pinch and twist the hand ............ roll (rotate in the screen plane)
   fist and move ....................... pan
   fist towards / away from the camera . zoom
-  two pinches, move hands apart/close . zoom
-  two pinches, turn like a wheel ...... roll
+  thumb + middle finger, up / down .... zoom (index, ring and little finger up)
+  with --two-hands also: two pinches, move apart/close: zoom; turn like a wheel: roll
+  fist squeezed twice quickly ......... fit all
   fingers held up and still ........... standard view (see POSES)
   open palm / no hand ................. idle
 
@@ -49,12 +50,15 @@ def _d(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def classify(pts, pinch_thr=0.30, fist_thr=0.90):
+def classify(pts, pinch_thr=0.30, fist_thr=0.90, lift_thr=0.30):
     """pts: 21 (x, y) points in isotropic units. Returns (gesture, palm_center).
 
     fist:  all four fingertips are pulled back to the palm (closer to the wrist than
            fist_thr x their knuckle). A merely relaxed or half-curled hand is not a fist.
     pinch: thumb tip and index tip closer than pinch_thr x palm size.
+    lift:  thumb tip and middle tip closer than lift_thr x palm size while the index is clearly
+           away and ring and little finger are not folded (pointing with the index, thumb resting
+           on the folded middle finger, is not a lift).
     """
     cx = sum(pts[i][0] for i in PALM) / len(PALM)
     cy = sum(pts[i][1] for i in PALM) / len(PALM)
@@ -62,8 +66,12 @@ def classify(pts, pinch_thr=0.30, fist_thr=0.90):
     wrist = pts[WRIST]
     if all(_d(pts[t], wrist) < fist_thr * _d(pts[m], wrist) for t, m in zip(TIPS, MCPS)):
         return "fist", (cx, cy)
-    if _d(pts[THUMB_TIP], pts[INDEX_TIP]) / scale < pinch_thr:
+    index = _d(pts[THUMB_TIP], pts[INDEX_TIP]) / scale
+    if index < pinch_thr:
         return "pinch", (cx, cy)
+    if (_d(pts[THUMB_TIP], pts[12]) / scale < lift_thr and index > 0.5
+            and all(_d(pts[t], wrist) > _d(pts[p], wrist) for t, p in ((16, 14), (20, 18)))):
+        return "lift", (cx, cy)
     return "open", (cx, cy)
 
 
@@ -94,6 +102,8 @@ def pose_of(pts):
     out_by = _d(pts[THUMB_TIP], pts[5]) / scale
     thumb = True if out_by > 0.70 else False if out_by < 0.55 else None
     key = tuple(raised)
+    if key == (1, 1, 1, 1) and _d(pts[THUMB_TIP], pts[13]) / scale < 0.45:
+        return "fit"   # only with the thumb clearly folded across the palm; an open hand is a pause
     if key + (None,) in POSES:
         return POSES[key + (None,)]
     return None if thumb is None else POSES.get(key + (thumb,))
@@ -156,7 +166,7 @@ class Gestures:
     """Turns per-frame hand landmarks into debounced, smoothed motion packets."""
 
     def __init__(self, pinch_on=0.30, pinch_off=None, fist_on=0.90, fist_off=None,
-                 smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2):
+                 smooth=0.5, deadzone=0.002, debounce=2, max_jump=0.2, view_hold=0.3):
         self.pinch_on = pinch_on
         self.pinch_off = pinch_on * 1.5 if pinch_off is None else pinch_off
         self.fist_on = fist_on
@@ -171,15 +181,24 @@ class Gestures:
         self._raw = None      # last raw control value (point, or (distance, 0) for zoom)
         self._s = None        # smoothed control value
         self._prev = None     # smoothed value at the last emitted packet
-        self._idle_n = 0      # frames in a row with hands in view and no gesture
-        self._pose, self._pose_at, self._pose_n, self._pose_done = None, None, 0, False
+        self.view_hold = min(max(view_hold, 0.1), 3.0)
+        self._now = 0.0
+        self._idle_since = None   # since when hands are in view without any gesture
+        self._pose, self._pose_at, self._pose_t, self._pose_n = None, None, 0.0, 0
+        self._pose_miss, self._pose_done = 0, False
+        self._sq_on = self._sq_from = self._sq_at = None   # current fist: start time, start and last place
+        self._sq_end = self._sq_end_at = None              # end of a first short squeeze
+        self._sq_second = False
         self._twist = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=2 * math.pi)
         self._wheel = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=math.pi)
         self._push = Axis(engage=0.10, hold=0.03, step=0.006, max_jump=0.35)
 
-    POSE_FRAMES = 18  # how long raised fingers must be held still (about 0.6 s)
-    POSE_STILL = 0.05
-    PALMS_AFTER = 45  # idle frames before two open palms count: letting go of a zoom is not "fit"
+    LIFT_GAIN = 2.0
+    POSE_STILL = 0.07
+    PALMS_AFTER = 1.5   # idle seconds before two open palms count: letting go of a zoom is not "fit"
+    SQUEEZE = (0.05, 0.45)      # seconds a squeeze may last; a longer fist is a pan
+    SQUEEZE_GAP = (0.05, 0.50)  # seconds the hand is open between the two
+    SQUEEZE_STILL = 0.12
     MEMORY = 4        # frames a hand keeps its held gesture while undetected
     MATCH = 0.25      # how far a hand can move between frames and still be the same hand
 
@@ -200,7 +219,8 @@ class Gestures:
         held, used = self._match(centers)
         out = [classify(pts,
                         self.pinch_off if held.get(i) == "pinch" else self.pinch_on,
-                        self.fist_off if held.get(i) == "fist" else self.fist_on)
+                        self.fist_off if held.get(i) == "fist" else self.fist_on,
+                        self.pinch_off if held.get(i) == "lift" else self.pinch_on)
                for i, pts in enumerate(hands_pts)]
         unseen = [(g, c, n + 1) for j, (g, c, n) in enumerate(self._hands)
                   if j not in used and n + 1 <= self.MEMORY]
@@ -212,19 +232,25 @@ class Gestures:
             return points[0]
         return min(points, key=lambda c: _d(c, self._raw))
 
-    def update(self, hands_pts):
-        """hands_pts: list of 21-point hands. Returns the list of packets (dicts) to send."""
+    def update(self, hands_pts, now=None):
+        """hands_pts: list of 21-point hands, now: seconds (default: 30 frames per second).
+        Returns the list of packets (dicts) to send."""
+        self._now = self._now + 1 / 30 if now is None else now
         hands = self.classify_hands(hands_pts)
         view = self._view(hands, hands_pts)
         if view:
             return view
+        return self._motion(hands, hands_pts) + ([{"t": "view", "v": "fit"}] if self._squeeze(hands) else [])
+
+    def _motion(self, hands, hands_pts):
         pinch = [pts for (g, _), pts in zip(hands, hands_pts) if g == "pinch"]
         fists = {c: pts for (g, c), pts in zip(hands, hands_pts) if g == "fist"}
         fist = list(fists)
+        lift = [c for g, c in hands if g == "lift"]
         aux = None
         if self._latch:
             # a hand lost for one frame is not an open hand: ask for several calm frames
-            self._calm = 0 if pinch or fist else self._calm + 1
+            self._calm = 0 if pinch or fist or lift else self._calm + 1
             if self._calm > self.debounce:
                 self._latch = False
             want, val = "idle", None
@@ -237,6 +263,8 @@ class Gestures:
         elif fist:
             want, val = "pan", (self._nearest(fist) if self.mode == "pan" else fist[0])
             aux = size_of(fists[val])
+        elif lift:
+            want, val = "lift", (self._nearest(lift) if self.mode == "lift" else lift[0])
         else:
             want, val = "idle", None
 
@@ -262,7 +290,9 @@ class Gestures:
             return []
         self._raw = val
         extra = []
-        if self.mode == "pan":
+        if self.mode == "lift":
+            pass
+        elif self.mode == "pan":
             d = self._push.update(aux)
             if d:
                 extra = [{"t": "depth", "d": d}]
@@ -277,26 +307,57 @@ class Gestures:
                 return extra
         return self._move(val) + extra
 
+    def _squeeze(self, hands):
+        """True once when a fist was closed twice, quickly and in place."""
+        fist = next((c for g, c in hands if g == "fist"), None)
+        now = self._now
+        if fist is not None:
+            if self._sq_on is None:
+                self._sq_second = (self._sq_end is not None
+                                   and self.SQUEEZE_GAP[0] <= now - self._sq_end <= self.SQUEEZE_GAP[1]
+                                   and _d(fist, self._sq_end_at) < self.SQUEEZE_STILL)
+                self._sq_on, self._sq_from = now, fist
+            self._sq_at = fist
+            return False
+        if self._sq_on is None:
+            return False
+        short = (self.SQUEEZE[0] <= now - self._sq_on <= self.SQUEEZE[1]
+                 and _d(self._sq_at, self._sq_from) < self.SQUEEZE_STILL)
+        self._sq_on = None
+        if short and self._sq_second:
+            self._sq_end = None
+            return True
+        self._sq_end, self._sq_end_at = (now, self._sq_at) if short else (None, None)
+        return False
+
     def _view(self, hands, hands_pts):
         """Raised fingers held still, while nothing else is going on, ask once for a standard view."""
         pose, at = None, None
-        self._idle_n = self._idle_n + 1 if self.mode == "idle" and hands else 0
-        if self.mode == "idle" and not any(g != "open" for g, _ in hands):
-            shown = [(pose_of(pts), c) for (_, c), pts in zip(hands, hands_pts) if pose_of(pts)]
+        calm = self.mode == "idle" and bool(hands) and all(g == "open" for g, _ in hands)
+        if not calm:
+            self._idle_since = None
+        elif self._idle_since is None:
+            self._idle_since = self._now
+        if calm:
+            shown = [(pose_of(pts), c) for (_, c), pts in zip(hands, hands_pts)]
             palms = [c for p, c in shown if p == "palm"]
-            shown = [x for x in shown if x[0] != "palm"]
+            shown = [x for x in shown if x[0] and x[0] != "palm"]
             if len(shown) == 1 and not palms:
                 pose, at = shown[0]
-            elif len(palms) == 2 and not shown and self._idle_n >= self.PALMS_AFTER:
+            elif len(palms) == 2 and not shown and self._now - self._idle_since >= self.PALMS_AFTER:
                 a, b = palms
                 pose, at = "fit", ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if calm and pose is None and self._pose and self._pose_miss < 2:
+            self._pose_miss += 1   # one or two unclear frames do not start the count again
+            return []
+        self._pose_miss = 0
         if pose is None or pose != self._pose or _d(at, self._pose_at) > self.POSE_STILL:
             # a view is given once per pose: moving the same raised fingers does not repeat it
             self._pose_done = self._pose_done and pose is not None and pose == self._pose
-            self._pose, self._pose_at, self._pose_n = pose, at, 0
+            self._pose, self._pose_at, self._pose_t, self._pose_n = pose, at, self._now, 0
             return []
         self._pose_n += 1
-        if self._pose_n < self.POSE_FRAMES or self._pose_done:
+        if self._pose_done or self._pose_n < 3 or self._now - self._pose_t < self.view_hold:
             return []
         self._pose_done = True
         return [{"t": "view", "v": pose}]
@@ -310,10 +371,10 @@ class Gestures:
         """What is happening now, for the preview."""
         if self.mode == "orbit" and self._twist.active:
             return "ROLL"
-        if self.mode == "idle" and self._pose and (self._pose_done or self._pose_n > 3):
-            done = "" if self._pose_done else " %d%%" % (100 * self._pose_n // self.POSE_FRAMES)
-            return self._pose.upper() + done
-        text = {"idle": "-", "orbit": "ORBIT", "pan": "PAN", "zoom": "ZOOM"}[self.mode]
+        if self.mode == "idle" and self._pose and (self._pose_done or self._pose_n > 1):
+            part = min(99, int(100 * (self._now - self._pose_t) / self.view_hold))
+            return self._pose.upper() + ("" if self._pose_done else " %d%%" % part)
+        text = {"idle": "-", "orbit": "ORBIT", "pan": "PAN", "zoom": "ZOOM", "lift": "ZOOM"}[self.mode]
         if self.mode == "pan" and self._push.active:
             text += " + ZOOM"
         if self.mode == "zoom" and self._wheel.active:
@@ -331,6 +392,8 @@ class Gestures:
             if prev[0] < 1e-3 or self._s[0] < 1e-3:
                 return []
             return [{"t": "zoom", "k2": prev[0] / self._s[0]}]
+        if self.mode == "lift":   # hand up: zoom in
+            return [{"t": "zoom", "k2": math.exp(self.LIFT_GAIN * dy)}] if dy else []
         return [{"t": self.mode, "dx": dx, "dy": -dy}]
 
     def _switch(self, new, val):
@@ -343,7 +406,7 @@ class Gestures:
         self.mode = new
         self._reset_axes()
         self._raw = self._s = self._prev = val
-        return [{"t": "mode", "m": new}]
+        return [{"t": "mode", "m": "zoom" if new == "lift" else new}]
 
 
 def out(msg):
@@ -470,11 +533,13 @@ def main():
     ap.add_argument("--port", type=int, default=47800)
     ap.add_argument("--token-file", default="", help="file with the session token written by the FreeCAD addon")
     ap.add_argument("--embed", action="store_true", help="send the preview to FreeCAD instead of opening a window")
+    ap.add_argument("--two-hands", action="store_true", help="track two hands: adds the two-hand gestures")
     ap.add_argument("--no-preview", action="store_true", help="no preview window")
     ap.add_argument("--standalone", action="store_true", help="keep running without FreeCAD listening (for testing)")
     ap.add_argument("--pinch", type=float, default=0.30, help="pinch threshold (smaller = stricter)")
     ap.add_argument("--fist", type=float, default=0.90, help="fist threshold (smaller = tighter fist needed)")
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
+    ap.add_argument("--view-hold", type=float, default=0.3, help="seconds raised fingers must be held still")
     args = ap.parse_args()
 
     token = ""
@@ -577,7 +642,7 @@ def run(args, link, stop, should_stop, say, finish, starting):
         ensure_model(say)
         landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
-            running_mode=vision.RunningMode.VIDEO, num_hands=2,
+            running_mode=vision.RunningMode.VIDEO, num_hands=2 if args.two_hands else 1,
             min_hand_detection_confidence=0.6, min_tracking_confidence=0.6))
     except Exception as e:
         finish("could not load the hand landmark model (%s)" % e, ok=False)
@@ -619,12 +684,12 @@ def run(args, link, stop, should_stop, say, finish, starting):
             time.sleep(0.25)
 
     starting.clear()   # from here on the capture loop itself checks for a stop
-    g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth)
-    colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80)}
+    g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold)
+    colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     draw = args.embed or not args.no_preview
     window = draw and not args.embed
     say("Running on %s" % cam_name)
-    out("Pinch: orbit, twist: roll, fist: pan, fist to/from the camera: zoom, two pinches: zoom, raised fingers: views. Stop: %s."
+    out("Pinch: orbit, twist: roll, fist: pan, thumb + middle finger up/down: zoom, raised fingers: views. Stop: %s."
         % ("q in the preview window, or Ctrl+C here" if window else "the HandNav button in FreeCAD, or Ctrl+C here"))
     n, ts, t0, bad_since = 0, -1, time.monotonic(), None
     while not should_stop():
@@ -646,7 +711,7 @@ def run(args, link, stop, should_stop, say, finish, starting):
         ts = max(ts + 1, int((time.monotonic() - t0) * 1000))   # must be strictly increasing
         res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
         hands = [[(p.x * w / h, p.y) for p in lms] for lms in res.hand_landmarks]
-        for pkt in g.update(hands):
+        for pkt in g.update(hands, time.monotonic()):
             link.packet(**pkt)
         if draw:
             for lms in res.hand_landmarks:

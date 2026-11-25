@@ -15,14 +15,16 @@ Gestures work like grabbing the model: the view follows your hand while the gest
 | Pinch (thumb + index) and move the hand | Orbit |
 | Pinch and twist the hand | Roll: rotate in the plane of the screen |
 | Fist and move the hand | Pan |
-| Fist, pull away from the camera / push towards it | Zoom in / out |
-| Pinch with both hands, move them apart / together | Zoom in / out |
-| Pinch with both hands, turn them like a wheel | Roll |
+| Thumb + middle finger together, other fingers up; hand up / down | Zoom in / out |
+| Fist, pull away from the camera / push towards it | Zoom in / out (coarse) |
+| Squeeze a fist twice, quickly and in place | Fit all |
 | Open or relaxed hand, or no hand in view | Pause |
 
-So a pinch rotates about three axes and a fist moves along three, like a 3D mouse.
+One hand does everything: a pinch rotates about three axes and a fist moves along three, like a 3D mouse. Use either hand; keep the other one out of the picture.
 
-Raise fingers with the hand pointing up and hold still for about 0.6 s to get a standard view. The name and progress are shown over the camera picture.
+With `TwoHands` set to `true` the tracker follows both hands and adds: pinch with both hands and move them apart or together to zoom, or turn them like a wheel to roll.
+
+Raise fingers with the hand pointing up and hold still for about 0.3 s to get a standard view. The name and progress are shown over the camera picture.
 
 | Fingers | View | With the thumb out to the side as well |
 |---|---|---|
@@ -31,12 +33,12 @@ Raise fingers with the hand pointing up and hold still for about 0.6 s to get a 
 | Index + middle + ring | Right | Left |
 | Index + little finger | Isometric | (same) |
 | Little finger | Fit all | (same) |
-| Both hands open, fingers up, thumbs out | Fit all | |
+| Four fingers, thumb folded across the palm | Fit all | |
 
-Two open palms count only after both hands have been idle for about 1.5 s, so letting go of a zoom does not trigger it.
+An open hand with the thumb out is a pause, not a view. With `TwoHands`, two open palms held up for about 2 s also fit all.
 
 - **Re-grip:** when your hand reaches the edge of the frame, open it, move it back and grab again, like lifting a mouse off the pad.
-- **After a zoom:** open both hands before starting the next gesture. Until then nothing moves, so letting go with one hand first does not spin the view.
+- **After a two-hand zoom:** open both hands before starting the next gesture. Until then nothing moves, so letting go with one hand first does not spin the view.
 - **Orbit centre:** the view turns around whatever is under the centre of the 3D view, or around the middle of the model when nothing is there. To orbit around a particular part, pan it to the centre first.
 - **Twist and push** start only after a deliberate movement (about 9°, or 10 % of the hand's apparent size), so ordinary orbiting and panning stay clean. While a twist is active, orbit waits.
 - **Level horizon:** orbit is a free trackball. Set `Turntable` to `true` to keep the horizon level around the model's Z axis; roll is then off.
@@ -79,10 +81,11 @@ Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entr
 | `Turntable` | Boolean | `false` | Keep the horizon level while orbiting and ignore roll. `false` rotates freely about the screen axes. |
 | `OrbitGain` | Float | `4.0` | Orbit sensitivity, radians per frame height of hand travel. |
 | `PanGain` | Float | `1.5` | Pan sensitivity, view heights per frame height of hand travel. |
-| `ZoomGain` | Float | `1.5` | Two-hand zoom sensitivity (exponent). |
+| `ZoomGain` | Float | `1.5` | Zoom sensitivity (exponent), except for the fist. |
 | `PushGain` | Float | `2.0` | Sensitivity of zooming with the fist. |
 | `RollGain` | Float | `1.0` | Roll per twist; `1.0` turns the view as much as the hand. |
 | `InvertRoll`, `InvertPush` | Boolean | `false` | Reverse the roll or the fist zoom. |
+| `TwoHands` | Boolean | `false` | Track two hands and enable the two-hand gestures. |
 | `ViewGestures` | Boolean | `true` | React to raised fingers with standard views. |
 | `InvertX`, `InvertY` | Boolean | `false` | Reverse the orbit direction. |
 | `UseTerminal` | Boolean | `false` | Run the tracker in a Terminal window instead of the helper app. Terminal then needs the camera permission. |
@@ -97,6 +100,7 @@ Tracker options (`tracker/hand_tracker.py --help`):
 - `--pinch` (default 0.30): how close thumb and index must be to count as a pinch, as a fraction of the palm size. Smaller is stricter.
 - `--fist` (default 0.90): how far the fingertips must be pulled back to count as a fist. Smaller needs a tighter fist.
 - `--smooth` (default 0.5, range 0.05 to 1): motion smoothing. Smaller is smoother and slower.
+- `--view-hold` (default 0.3): how many seconds raised fingers must be held still for a standard view.
 
 The gesture thresholds are first estimates: tune `--pinch` and `--fist` if a gesture triggers too easily or not at all.
 

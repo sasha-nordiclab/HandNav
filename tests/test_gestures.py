@@ -281,6 +281,86 @@ def fingers(cx, cy, raised, thumb):
     return p
 
 
+def lift(cx, cy, index_up=True, others_up=True):
+    """Thumb touching the middle fingertip."""
+    p = fingers(cx, cy, (index_up, 0, others_up, others_up), False)
+    p[12] = (cx - 0.05, cy - 0.02)
+    p[4] = (cx - 0.055, cy - 0.015)
+    return p
+
+
+class OneHandZoomTest(unittest.TestCase):
+    def _factor(self, dy):
+        g = ht.Gestures()
+        pk = feed(g, [[lift(0.5, 0.5 + dy * i)] for i in range(25)])
+        self.assertEqual(pk[0], {"t": "mode", "m": "zoom"})
+        self.assertEqual(set(kinds(pk[1:])), {"zoom"})
+        return math.prod(p["k2"] for p in pk[1:])
+
+    def test_up_zooms_in_and_down_zooms_out(self):
+        self.assertLess(self._factor(-0.01), 0.8)    # image y grows down
+        self.assertGreater(self._factor(0.01), 1.25)
+
+    def test_sideways_does_not_zoom(self):
+        g = ht.Gestures()
+        pk = feed(g, [[lift(0.2 + 0.01 * i, 0.5)] for i in range(25)])
+        self.assertEqual(math.prod(p.get("k2", 1) for p in pk), 1)
+
+    def test_pointing_with_the_thumb_on_the_middle_finger_is_the_front_view(self):
+        g = ht.Gestures()
+        pk = feed(g, [[lift(0.5, 0.5, others_up=False)]] * 30)
+        self.assertEqual(pk, [{"t": "view", "v": "front"}])
+        self.assertEqual(ht.classify(lift(0.5, 0.5, others_up=False))[0], "open")
+
+    def test_other_poses_are_not_a_lift(self):
+        for kind in ("open", "relaxed", "fist", "pinch", "natural_pinch", "gap"):
+            self.assertNotEqual(ht.classify(hand(0.5, 0.5, kind))[0], "lift", kind)
+        for raised, thumb, name in ViewTest.CASES:
+            self.assertEqual(ht.classify(fingers(0.5, 0.5, raised, thumb))[0], "open", name)
+
+    def test_zoom_then_orbit_with_the_same_hand_needs_no_pause(self):
+        g = ht.Gestures()
+        feed(g, [[lift(0.5, 0.5)]] * 5)
+        feed(g, [[hand(0.5, 0.5, "pinch")]] * 5)
+        self.assertEqual(g.mode, "orbit")
+
+    def test_four_fingers_with_the_thumb_folded_fit_all(self):
+        g = ht.Gestures()
+        p = fingers(0.5, 0.5, (1, 1, 1, 1), False)
+        p[4] = (0.51, 0.52)
+        self.assertEqual(feed(g, [[p]] * 60), [{"t": "view", "v": "fit"}])
+
+
+class SqueezeTest(unittest.TestCase):
+    FIST, OPEN = [[hand(0.5, 0.5, "fist")]], [[hand(0.5, 0.5, "open")]]
+
+    def _views(self, frames):
+        return [p for p in feed(ht.Gestures(), frames) if p["t"] == "view"]
+
+    def test_two_quick_squeezes_fit_all_once(self):
+        f, o = self.FIST, self.OPEN
+        self.assertEqual(self._views(o * 5 + f * 6 + o * 5 + f * 6 + o * 20), [{"t": "view", "v": "fit"}])
+
+    def test_one_squeeze_or_two_slow_ones_do_nothing(self):
+        f, o = self.FIST, self.OPEN
+        self.assertEqual(self._views(o * 5 + f * 6 + o * 40), [])
+        self.assertEqual(self._views(o * 5 + f * 6 + o * 30 + f * 6 + o * 20), [])
+
+    def test_regripping_while_panning_does_nothing(self):
+        o = self.OPEN
+        pan = [[hand(0.3 + 0.01 * i, 0.5, "fist")] for i in range(25)]
+        back = [[hand(0.55 - 0.05 * i, 0.5, "open")] for i in range(5)]
+        self.assertEqual(self._views(pan + back + pan + back + pan + o * 10), [])
+
+    def test_works_at_a_low_frame_rate(self):
+        g, t, pk = ht.Gestures(), 0.0, []
+        for frames in (self.OPEN * 3, self.FIST * 3, self.OPEN * 3, self.FIST * 3, self.OPEN * 6):
+            for hands in frames:
+                t += 1 / 12
+                pk += g.update(hands, t)
+        self.assertEqual([p for p in pk if p["t"] == "view"], [{"t": "view", "v": "fit"}])
+
+
 class ViewTest(unittest.TestCase):
     CASES = [((1, 0, 0, 0), False, "front"), ((1, 0, 0, 0), True, "rear"),
              ((1, 1, 0, 0), False, "top"), ((1, 1, 0, 0), True, "bottom"),
@@ -310,13 +390,27 @@ class ViewTest(unittest.TestCase):
 
     def test_short_or_moving_pose_gives_nothing(self):
         g = ht.Gestures()
-        self.assertEqual(feed(g, [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]] * 10 + [[]] * 5), [])
+        self.assertEqual(feed(g, [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]] * 6 + [[]] * 5), [])
         self.assertEqual(feed(g, [[fingers(0.2 + 0.01 * i, 0.5, (1, 0, 0, 0), False)] for i in range(50)]), [])
 
     def test_open_palm_fist_pinch_and_relaxed_hand_are_no_views(self):
         for kind in ("open", "relaxed", "fist", "pinch", "natural_pinch"):
             g = ht.Gestures()
             self.assertNotIn("view", kinds(feed(g, [[hand(0.5, 0.5, kind)]] * 60)), kind)
+
+    def test_view_comes_after_the_hold_time_whatever_the_frame_rate(self):
+        for fps in (12, 30):
+            g, n = ht.Gestures(), 0
+            while not g.update([fingers(0.5, 0.5, (1, 1, 0, 0), False)], 10 + n / fps):
+                n += 1
+            self.assertLess(n / fps, 0.4, fps)
+            self.assertGreaterEqual(n / fps, 0.25, fps)
+
+    def test_an_unclear_frame_does_not_restart_the_hold(self):
+        g = ht.Gestures()
+        one = [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]]
+        blur = [[fingers(0.5, 0.5, (1, 0, 1, 0), False)]]
+        self.assertEqual(feed(g, one * 5 + blur + one * 5), [{"t": "view", "v": "front"}])
 
     def test_hand_pointing_sideways_is_no_view(self):
         g = ht.Gestures()

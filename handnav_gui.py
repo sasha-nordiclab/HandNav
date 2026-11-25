@@ -247,6 +247,8 @@ class Navigator(QtCore.QObject):
             args += ["--camera-name", name]
         if self.dock is not None:
             args.append("--embed")
+        if p.GetBool("TwoHands", False):
+            args.append("--two-hands")
         try:
             args += shlex.split(p.GetString("TrackerArgs", ""))
         except ValueError as e:
@@ -477,8 +479,8 @@ class ToggleCommand:
     def GetResources(self):
         return {"MenuText": "HandNav: hand gesture navigation",
                 "ToolTip": "Orbit, pan and zoom the 3D view with hand gestures seen by a webcam.\n"
-                           "Pinch: orbit, twist to roll. Fist: pan, push or pull to zoom.\n"
-                           "Two pinches: zoom and roll. Raised fingers: standard views. Open hand: pause.",
+                           "Pinch: orbit, twist to roll. Fist: pan. Thumb + middle finger, up or down: zoom.\n"
+                           "Raised fingers: standard views. Open hand: pause.",
                 "Pixmap": os.path.join(HERE, "handnav.svg"),
                 "Checkable": False}
 
