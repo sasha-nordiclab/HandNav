@@ -28,6 +28,11 @@ SCRUB_ENV = ("PYTHONHOME", "PYTHONPATH", "PREFIX", "LD_LIBRARY_PATH", "SSL_CERT_
              "FONTCONFIG_FILE", "FONTCONFIG_PATH")
 
 
+# only these can be asked for by a packet
+VIEWS = {"front": "viewFront", "rear": "viewRear", "top": "viewTop", "bottom": "viewBottom",
+         "right": "viewRight", "left": "viewLeft", "iso": "viewIsometric", "fit": "fitAll"}
+
+
 def _p():
     return App.ParamGet(PARAMS)
 
@@ -270,6 +275,8 @@ class Navigator(QtCore.QObject):
         orbit = [0.0, 0.0]
         pan = [0.0, 0.0]
         zoom = 1.0
+        roll = 0.0
+        push = 0.0
         frame = None
         got = False
         tok = self.token.encode()
@@ -292,6 +299,12 @@ class Navigator(QtCore.QObject):
                     pan[1] += _num(m, "dy", -1, 1)
                 elif t == "zoom":
                     zoom *= _num(m, "k2", 0.5, 2.0)
+                elif t == "roll":
+                    roll += _num(m, "a", -1, 1)
+                elif t == "depth":
+                    push += _num(m, "d", -1, 1)
+                elif t == "view":
+                    self._set_view(str(m.get("v")))
                 elif t == "mode":
                     self._depth = None  # new gesture: pick the pivot again
                     self._show_mode(str(m.get("m")))
@@ -307,7 +320,7 @@ class Navigator(QtCore.QObject):
             if frame is not None:
                 self.dock.show_jpeg(frame)
         try:
-            self.apply(orbit, pan, zoom)
+            self.apply(orbit, pan, zoom, roll, push)
         except Exception as e:
             App.Console.PrintWarning("HandNav: %s\n" % e)
 
@@ -331,6 +344,18 @@ class Navigator(QtCore.QObject):
             self.dock.set_text(text + "\nSwitch HandNav off and on to restart it.", final=True)
         else:
             _status(text)
+
+    def _set_view(self, name):
+        view = Gui.activeView()
+        if name not in VIEWS or not _p().GetBool("ViewGestures", True) or not hasattr(view, "getCameraNode"):
+            return
+        self._depth = None
+        try:
+            getattr(view, VIEWS[name])()
+        except Exception as e:
+            App.Console.PrintWarning("HandNav: %s\n" % e)
+            return
+        self._show_mode(name)
 
     # --- camera ----------------------------------------------------------
     def _pivot_depth(self, view, pos, look, fallback, ortho):
@@ -360,8 +385,8 @@ class Navigator(QtCore.QObject):
             self._depth = depth
         return self._depth
 
-    def apply(self, orbit=(0.0, 0.0), pan=(0.0, 0.0), zoom=1.0):
-        if not (orbit[0] or orbit[1] or pan[0] or pan[1] or zoom != 1.0):
+    def apply(self, orbit=(0.0, 0.0), pan=(0.0, 0.0), zoom=1.0, roll=0.0, push=0.0):
+        if not (orbit[0] or orbit[1] or pan[0] or pan[1] or zoom != 1.0 or roll or push):
             return
         view = Gui.activeView()
         if view is None or not hasattr(view, "getCameraNode"):
@@ -374,6 +399,7 @@ class Navigator(QtCore.QObject):
         fd = cam.focalDistance.getValue()
         look = rot.multVec(coin.SbVec3f(0, 0, -1))
         ortho = view.getCameraType() == "Orthographic"
+        turntable = p.GetBool("Turntable", False)
 
         if orbit[0] or orbit[1]:
             g = p.GetFloat("OrbitGain", 4.0)
@@ -382,7 +408,7 @@ class Navigator(QtCore.QObject):
             depth = self._pivot_depth(view, pos, look, fd, ortho)
             pivot = pos + look * depth
             # Coin applies the left factor first.
-            if p.GetBool("Turntable", True):
+            if turntable:
                 # yaw about the world Z axis, pitch about the camera's X axis: the horizon stays level
                 if rot.multVec(coin.SbVec3f(0, 1, 0))[2] < 0:
                     yaw = -yaw   # camera is upside down
@@ -397,6 +423,13 @@ class Navigator(QtCore.QObject):
             pos = pivot - look * depth
             cam.position.setValue(pos)
 
+        if roll and not turntable:
+            # the model turns with the hand, so the camera turns the other way about its own view
+            # axis; the pivot lies on that axis and the position stays
+            a = -roll * p.GetFloat("RollGain", 1.0) * (-1.0 if p.GetBool("InvertRoll", False) else 1.0)
+            rot = coin.SbRotation(coin.SbVec3f(0, 0, 1), a) * rot
+            cam.orientation.setValue(rot)
+
         if pan[0] or pan[1]:
             h = cam.height.getValue() if ortho else 2.0 * fd * math.tan(cam.heightAngle.getValue() / 2.0)
             g = p.GetFloat("PanGain", 1.5) * h
@@ -405,8 +438,10 @@ class Navigator(QtCore.QObject):
             pos = pos - right * (pan[0] * g) - up * (pan[1] * g)
             cam.position.setValue(pos)
 
-        if zoom != 1.0:
-            k = min(max(zoom ** p.GetFloat("ZoomGain", 1.5), 0.5), 2.0)
+        if zoom != 1.0 or push:
+            # pushing the fist towards the screen moves the model away, pulling brings it closer
+            away = push * p.GetFloat("PushGain", 2.0) * (-1.0 if p.GetBool("InvertPush", False) else 1.0)
+            k = min(max(zoom ** p.GetFloat("ZoomGain", 1.5) * math.exp(away), 0.5), 2.0)
             if ortho:
                 cam.height.setValue(cam.height.getValue() * k)
             else:
@@ -442,7 +477,8 @@ class ToggleCommand:
     def GetResources(self):
         return {"MenuText": "HandNav: hand gesture navigation",
                 "ToolTip": "Orbit, pan and zoom the 3D view with hand gestures seen by a webcam.\n"
-                           "Pinch: orbit. Fist: pan. Two pinches: zoom. Open palm: pause.",
+                           "Pinch: orbit, twist to roll. Fist: pan, push or pull to zoom.\n"
+                           "Two pinches: zoom and roll. Raised fingers: standard views. Open hand: pause.",
                 "Pixmap": os.path.join(HERE, "handnav.svg"),
                 "Checkable": False}
 

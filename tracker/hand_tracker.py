@@ -3,12 +3,18 @@
 
 Gestures
   pinch (thumb + index) and move ...... orbit
+  pinch and twist the hand ............ roll (rotate in the screen plane)
   fist and move ....................... pan
+  fist towards / away from the camera . zoom
   two pinches, move hands apart/close . zoom
+  two pinches, turn like a wheel ...... roll
+  fingers held up and still ........... standard view (see POSES)
   open palm / no hand ................. idle
 
 Packets to 127.0.0.1:PORT (JSON, each carries "k": TOKEN):
   {"t":"orbit","dx":..,"dy":..}  {"t":"pan","dx":..,"dy":..}  {"t":"zoom","k2":..}
+  {"t":"roll","a":radians, counter-clockwise on screen}  {"t":"depth","d":log of hand size change}
+  {"t":"view","v":"front|rear|top|bottom|right|left|iso|fit"}
   {"t":"mode","m":"idle|orbit|pan|zoom"}  {"t":"status","msg":..}  {"t":"alive"}
   {"t":"bye","msg":..,"ok":true|false}
 dx/dy are in units of frame height, +x right, +y up (mirror view).
@@ -35,7 +41,7 @@ MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
 MODEL_SHA256 = "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
 
 WRIST, THUMB_TIP, INDEX_TIP = 0, 4, 8
-TIPS, MCPS = (8, 12, 16, 20), (5, 9, 13, 17)
+TIPS, PIPS, MCPS = (8, 12, 16, 20), (6, 10, 14, 18), (5, 9, 13, 17)
 PALM = (0, 5, 9, 13, 17)
 
 
@@ -61,6 +67,90 @@ def classify(pts, pinch_thr=0.30, fist_thr=0.90):
     return "open", (cx, cy)
 
 
+# raised (index, middle, ring, pinky), thumb out -> view; None: the thumb does not matter
+POSES = {
+    (1, 0, 0, 0, False): "front", (1, 0, 0, 0, True): "rear",
+    (1, 1, 0, 0, False): "top", (1, 1, 0, 0, True): "bottom",
+    (1, 1, 1, 0, False): "right", (1, 1, 1, 0, True): "left",
+    (1, 0, 0, 1, None): "iso",
+    (0, 0, 0, 1, None): "fit",
+}
+
+
+def pose_of(pts):
+    """Standard view shown by a hand with raised fingers, or None. Anything unclear is None."""
+    wrist = pts[WRIST]
+    up, side = wrist[1] - pts[9][1], abs(wrist[0] - pts[9][0])
+    if up <= 0 or side > 1.2 * up:   # only a hand that points upwards
+        return None
+    raised = []
+    for t, p in zip(TIPS, PIPS):
+        ratio = _d(pts[t], wrist) / max(_d(pts[p], wrist), 1e-6)
+        if 1.0 <= ratio <= 1.12:     # half bent
+            return None
+        raised.append(1 if ratio > 1.12 else 0)
+    scale = max(_d(pts[0], pts[9]), _d(pts[5], pts[17]), 1e-6)
+    out_by = _d(pts[THUMB_TIP], pts[5]) / scale
+    thumb = True if out_by > 0.70 else False if out_by < 0.55 else None
+    key = tuple(raised)
+    if key + (None,) in POSES:
+        return POSES[key + (None,)]
+    return None if thumb is None else POSES.get(key + (thumb,))
+
+
+def twist_of(pts):
+    """In-plane direction of the hand (wrist to middle knuckle), counter-clockwise on screen."""
+    return math.atan2(pts[WRIST][1] - pts[9][1], pts[9][0] - pts[WRIST][0])
+
+
+def size_of(pts):
+    """Log of the apparent palm size: grows as the hand comes closer to the camera."""
+    return math.log(max(_d(pts[0], pts[9]), _d(pts[5], pts[17]), 1e-3))
+
+
+class Axis:
+    """A secondary motion (twist, push) that only engages on a deliberate movement, so that plain
+    orbiting or panning does not leak into it, and lets go again when the movement ends."""
+
+    def __init__(self, engage, hold, step, max_jump, period=None, smooth=0.35):
+        self.engage, self.hold, self.step, self.max_jump = engage, hold, step, max_jump
+        self.period, self.smooth = period, smooth
+        self.reset(None)
+
+    def reset(self, value):
+        self._raw, self._acc, self._s, self._ref = value, 0.0, 0.0, 0.0
+        self._recent, self.active = [], False
+
+    def update(self, value):
+        """Returns the change to apply for this frame (0.0 while not engaged)."""
+        if self._raw is None:
+            self.reset(value)
+            return 0.0
+        d = value - self._raw
+        if self.period:   # shortest way round
+            d -= self.period * round(d / self.period)
+        self._raw = value
+        if abs(d) > self.max_jump:   # tracking glitch or another hand
+            self.reset(value)
+            return 0.0
+        self._acc += d
+        self._s += self.smooth * (self._acc - self._s)
+        self._recent = (self._recent + [self._s])[-12:]
+        if not self.active:
+            self._ref += 0.05 * (self._s - self._ref)   # forget slow drift of the grip
+            if abs(self._s - self._ref) > self.engage:
+                self.active, self._ref, self._recent = True, self._s, [self._s]
+            return 0.0
+        if len(self._recent) == 12 and max(self._recent) - min(self._recent) < self.hold:
+            self.reset(value)
+            return 0.0
+        change = self._s - self._ref
+        if abs(change) < self.step:
+            return 0.0
+        self._ref = self._s
+        return change
+
+
 class Gestures:
     """Turns per-frame hand landmarks into debounced, smoothed motion packets."""
 
@@ -80,7 +170,13 @@ class Gestures:
         self._raw = None      # last raw control value (point, or (distance, 0) for zoom)
         self._s = None        # smoothed control value
         self._prev = None     # smoothed value at the last emitted packet
+        self._pose, self._pose_at, self._pose_n, self._pose_done = None, None, 0, False
+        self._twist = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=2 * math.pi)
+        self._wheel = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=math.pi)
+        self._push = Axis(engage=0.10, hold=0.03, step=0.006, max_jump=0.35)
 
+    POSE_FRAMES = 18  # how long raised fingers must be held still (about 0.6 s)
+    POSE_STILL = 0.05
     MEMORY = 4        # frames a hand keeps its held gesture while undetected
     MATCH = 0.25      # how far a hand can move between frames and still be the same hand
 
@@ -116,8 +212,13 @@ class Gestures:
     def update(self, hands_pts):
         """hands_pts: list of 21-point hands. Returns the list of packets (dicts) to send."""
         hands = self.classify_hands(hands_pts)
-        pinch = [c for g, c in hands if g == "pinch"]
-        fist = [c for g, c in hands if g == "fist"]
+        view = self._view(hands, hands_pts)
+        if view:
+            return view
+        pinch = [pts for (g, _), pts in zip(hands, hands_pts) if g == "pinch"]
+        fists = {c: pts for (g, c), pts in zip(hands, hands_pts) if g == "fist"}
+        fist = list(fists)
+        aux = None
         if self._latch:
             # a hand lost for one frame is not an open hand: ask for several calm frames
             self._calm = 0 if pinch or fist else self._calm + 1
@@ -125,11 +226,14 @@ class Gestures:
                 self._latch = False
             want, val = "idle", None
         elif len(pinch) >= 2:
-            want, val = "zoom", (_d(pinch[0], pinch[1]), 0.0)
+            a, b = classify(pinch[0])[1], classify(pinch[1])[1]
+            want, val, aux = "zoom", (_d(a, b), 0.0), math.atan2(a[1] - b[1], b[0] - a[0])
         elif len(pinch) == 1:
-            want, val = "orbit", pinch[0]
+            # the wrist, because twisting the hand moves the palm but hardly the wrist
+            want, val, aux = "orbit", pinch[0][WRIST], twist_of(pinch[0])
         elif fist:
             want, val = "pan", (self._nearest(fist) if self.mode == "pan" else fist[0])
+            aux = size_of(fists[val])
         else:
             want, val = "idle", None
 
@@ -151,8 +255,63 @@ class Gestures:
         if _d(val, self._raw) > self.max_jump:
             # tracking jumped to the other hand or glitched: re-anchor instead of moving the view
             self._raw = self._s = self._prev = val
+            self._reset_axes()
             return []
         self._raw = val
+        extra = []
+        if self.mode == "pan":
+            d = self._push.update(aux)
+            if d:
+                extra = [{"t": "depth", "d": d}]
+        else:
+            axis = self._twist if self.mode == "orbit" else self._wheel
+            d = axis.update(aux)
+            if d:
+                extra = [{"t": "roll", "a": d}]
+            if axis is self._twist and axis.active:
+                # rolling: the small shift that comes with a twist must not orbit as well
+                self._s = self._prev = val
+                return extra
+        return self._move(val) + extra
+
+    def _view(self, hands, hands_pts):
+        """Raised fingers held still, while nothing else is going on, ask once for a standard view."""
+        pose, at = None, None
+        if self.mode == "idle" and not any(g != "open" for g, _ in hands):
+            shown = [(pose_of(pts), c) for (_, c), pts in zip(hands, hands_pts) if pose_of(pts)]
+            if len(shown) == 1:
+                pose, at = shown[0]
+        if pose is None or pose != self._pose or _d(at, self._pose_at) > self.POSE_STILL:
+            # a view is given once per pose: moving the same raised fingers does not repeat it
+            self._pose_done = self._pose_done and pose is not None and pose == self._pose
+            self._pose, self._pose_at, self._pose_n = pose, at, 0
+            return []
+        self._pose_n += 1
+        if self._pose_n < self.POSE_FRAMES or self._pose_done:
+            return []
+        self._pose_done = True
+        return [{"t": "view", "v": pose}]
+
+    def _reset_axes(self):
+        for axis in (self._twist, self._wheel, self._push):
+            axis.reset(None)
+
+    @property
+    def label(self):
+        """What is happening now, for the preview."""
+        if self.mode == "orbit" and self._twist.active:
+            return "ROLL"
+        if self.mode == "idle" and self._pose and (self._pose_done or self._pose_n > 3):
+            done = "" if self._pose_done else " %d%%" % (100 * self._pose_n // self.POSE_FRAMES)
+            return self._pose.upper() + done
+        text = {"idle": "-", "orbit": "ORBIT", "pan": "PAN", "zoom": "ZOOM"}[self.mode]
+        if self.mode == "pan" and self._push.active:
+            text += " + ZOOM"
+        if self.mode == "zoom" and self._wheel.active:
+            text += " + ROLL"
+        return text
+
+    def _move(self, val):
         a = self.smooth
         self._s = (self._s[0] + a * (val[0] - self._s[0]), self._s[1] + a * (val[1] - self._s[1]))
         dx, dy = self._s[0] - self._prev[0], self._s[1] - self._prev[1]
@@ -173,6 +332,7 @@ class Gestures:
         if new == self.mode:
             return []
         self.mode = new
+        self._reset_axes()
         self._raw = self._s = self._prev = val
         return [{"t": "mode", "m": new}]
 
@@ -452,11 +612,10 @@ def run(args, link, stop, should_stop, say, finish, starting):
     starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80)}
-    labels = {"idle": "-", "orbit": "ORBIT", "pan": "PAN", "zoom": "ZOOM"}
     draw = args.embed or not args.no_preview
     window = draw and not args.embed
     say("Running on %s" % cam_name)
-    out("Pinch: orbit, fist: pan, two pinches: zoom. Stop: %s."
+    out("Pinch: orbit, twist: roll, fist: pan, fist to/from the camera: zoom, two pinches: zoom, raised fingers: views. Stop: %s."
         % ("q in the preview window, or Ctrl+C here" if window else "the HandNav button in FreeCAD, or Ctrl+C here"))
     n, ts, t0, bad_since = 0, -1, time.monotonic(), None
     while not should_stop():
@@ -484,7 +643,7 @@ def run(args, link, stop, should_stop, say, finish, starting):
             for lms in res.hand_landmarks:
                 for p in lms:
                     cv2.circle(frame, (int(p.x * w), int(p.y * h)), 3, colors[g.mode], -1)
-            cv2.putText(frame, labels[g.mode], (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, colors[g.mode], 2)
+            cv2.putText(frame, g.label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, colors[g.mode], 2)
         if args.embed:
             n += 1
             if n % 2 == 0:  # ~15 fps is plenty for a preview

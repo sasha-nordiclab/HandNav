@@ -3,6 +3,7 @@
     python3 -m unittest discover -s tests
 """
 import json
+import math
 import os
 import socket
 import subprocess
@@ -199,6 +200,123 @@ class GesturesTest(unittest.TestCase):
     def test_smooth_is_clamped(self):
         self.assertGreater(ht.Gestures(smooth=0).smooth, 0)
         self.assertEqual(ht.Gestures(smooth=5).smooth, 1.0)
+
+
+def turned(pts, deg, about=None):
+    """Rotate a hand counter-clockwise on screen (about the wrist by default)."""
+    ox, oy = about or pts[0]
+    c, n = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return [(ox + (x - ox) * c + (y - oy) * n, oy - (x - ox) * n + (y - oy) * c) for x, y in pts]
+
+
+def scaled(pts, k):
+    ox, oy = ht.classify(pts)[1]
+    return [(ox + (x - ox) * k, oy + (y - oy) * k) for x, y in pts]
+
+
+class SixAxisTest(unittest.TestCase):
+    def test_twisting_a_pinch_rolls_counter_clockwise(self):
+        g = ht.Gestures()
+        pk = feed(g, [[turned(hand(0.5, 0.5, "pinch"), 2 * i)] for i in range(30)])
+        roll = sum(p["a"] for p in pk if p["t"] == "roll")
+        self.assertGreater(roll, math.radians(25))
+        self.assertLess(roll, math.radians(58))
+        self.assertEqual(g.label, "ROLL")
+        self.assertNotIn("orbit", kinds(pk))      # a twist about the wrist does not orbit
+
+    def test_clockwise_is_negative(self):
+        g = ht.Gestures()
+        pk = feed(g, [[turned(hand(0.5, 0.5, "pinch"), -2 * i)] for i in range(30)])
+        self.assertLess(sum(p["a"] for p in pk if p["t"] == "roll"), 0)
+
+    def test_twist_across_the_half_turn_does_not_jump(self):
+        g = ht.Gestures()
+        pk = feed(g, [[turned(hand(0.5, 0.5, "pinch"), 60 + 2 * i)] for i in range(40)])
+        self.assertLess(max(abs(p["a"]) for p in pk if p["t"] == "roll"), 0.1)
+
+    def test_orbit_with_a_small_wobble_does_not_roll(self):
+        g = ht.Gestures()
+        pk = feed(g, [[turned(hand(0.2 + 0.01 * i, 0.5, "pinch"), 4 * math.sin(i))] for i in range(40)])
+        self.assertNotIn("roll", kinds(pk))
+        self.assertIn("orbit", kinds(pk))
+
+    def test_orbit_resumes_after_a_twist(self):
+        g = ht.Gestures()
+        feed(g, [[turned(hand(0.4, 0.5, "pinch"), 2 * i)] for i in range(20)])
+        feed(g, [[turned(hand(0.4, 0.5, "pinch"), 38)]] * 20)
+        pk = feed(g, [[turned(hand(0.4 + 0.01 * i, 0.5, "pinch"), 38)] for i in range(10)])
+        self.assertIn("orbit", kinds(pk))
+
+    def test_fist_towards_the_camera_is_positive_depth(self):
+        for step, sign in ((0.02, 1), (-0.02, -1)):
+            g = ht.Gestures()
+            pk = feed(g, [[scaled(hand(0.5, 0.5, "fist"), 1 + step * i)] for i in range(25)])
+            self.assertGreater(sign * sum(p["d"] for p in pk if p["t"] == "depth"), 0.1)
+
+    def test_plain_pan_does_not_zoom(self):
+        g = ht.Gestures()
+        pk = feed(g, [[scaled(hand(0.2 + 0.01 * i, 0.5, "fist"), 1 + 0.03 * math.sin(i))] for i in range(40)])
+        self.assertNotIn("depth", kinds(pk))
+
+    def test_two_pinches_turned_like_a_wheel_roll(self):
+        g = ht.Gestures()
+        mid = (0.5, 0.5)
+        frames = []
+        for i in range(25):
+            x, y = 0.15 * math.cos(math.radians(2 * i)), 0.15 * math.sin(math.radians(2 * i))
+            two = [hand(mid[0] + x, mid[1] - y, "pinch"), hand(mid[0] - x, mid[1] + y, "pinch")]
+            frames.append(two if i % 2 else two[::-1])    # MediaPipe may swap the order
+        pk = feed(g, frames)
+        self.assertGreater(sum(p["a"] for p in pk if p["t"] == "roll"), 0.2)
+
+
+def fingers(cx, cy, raised, thumb):
+    """Hand with the given (index, middle, ring, pinky) raised and the thumb out or tucked."""
+    p = hand(cx, cy, "fist")
+    for base, r in zip((5, 9, 13, 17), raised):
+        if r:
+            x = p[base][0]
+            p[base + 1], p[base + 2], p[base + 3] = (x, cy - 0.04), (x, cy - 0.07), (x, cy - 0.10)
+    p[4] = (cx - 0.12, cy - 0.01) if thumb else (cx, cy - 0.01)
+    return p
+
+
+class ViewTest(unittest.TestCase):
+    CASES = [((1, 0, 0, 0), False, "front"), ((1, 0, 0, 0), True, "rear"),
+             ((1, 1, 0, 0), False, "top"), ((1, 1, 0, 0), True, "bottom"),
+             ((1, 1, 1, 0), False, "right"), ((1, 1, 1, 0), True, "left"),
+             ((1, 0, 0, 1), False, "iso"), ((0, 0, 0, 1), False, "fit")]
+
+    def test_each_pose_gives_its_view_exactly_once(self):
+        for raised, thumb, name in self.CASES:
+            g = ht.Gestures()
+            pk = feed(g, [[fingers(0.5, 0.5, raised, thumb)]] * 60)
+            self.assertEqual(pk, [{"t": "view", "v": name}], name)
+
+    def test_short_or_moving_pose_gives_nothing(self):
+        g = ht.Gestures()
+        self.assertEqual(feed(g, [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]] * 10 + [[]] * 5), [])
+        self.assertEqual(feed(g, [[fingers(0.2 + 0.01 * i, 0.5, (1, 0, 0, 0), False)] for i in range(50)]), [])
+
+    def test_open_palm_fist_pinch_and_relaxed_hand_are_no_views(self):
+        for kind in ("open", "relaxed", "fist", "pinch", "natural_pinch"):
+            g = ht.Gestures()
+            self.assertNotIn("view", kinds(feed(g, [[hand(0.5, 0.5, kind)]] * 60)), kind)
+
+    def test_hand_pointing_sideways_is_no_view(self):
+        g = ht.Gestures()
+        self.assertEqual(feed(g, [[turned(fingers(0.5, 0.5, (1, 0, 0, 0), False), 80)]] * 60), [])
+
+    def test_same_view_again_after_lowering_the_fingers(self):
+        g = ht.Gestures()
+        one = [[fingers(0.5, 0.5, (1, 1, 0, 0), False)]] * 30
+        pk = feed(g, one + [[hand(0.5, 0.5, "open")]] * 5 + one)
+        self.assertEqual(pk, [{"t": "view", "v": "top"}] * 2)
+
+    def test_no_view_while_the_other_hand_is_working(self):
+        g = ht.Gestures()
+        pk = feed(g, [[hand(0.2, 0.5, "pinch"), fingers(0.8, 0.5, (1, 0, 0, 0), False)]] * 60)
+        self.assertNotIn("view", kinds(pk))
 
 
 class LinkTest(unittest.TestCase):

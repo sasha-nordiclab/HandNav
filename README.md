@@ -13,15 +13,30 @@ Gestures work like grabbing the model: the view follows your hand while the gest
 | Gesture | Action |
 |---|---|
 | Pinch (thumb + index) and move the hand | Orbit |
+| Pinch and twist the hand | Roll: rotate in the plane of the screen |
 | Fist and move the hand | Pan |
-| Pinch with both hands, move them apart | Zoom in |
-| Pinch with both hands, move them together | Zoom out |
+| Fist, pull away from the camera / push towards it | Zoom in / out |
+| Pinch with both hands, move them apart / together | Zoom in / out |
+| Pinch with both hands, turn them like a wheel | Roll |
 | Open or relaxed hand, or no hand in view | Pause |
+
+So a pinch rotates about three axes and a fist moves along three, like a 3D mouse.
+
+Raise fingers with the hand pointing up and hold still for about 0.6 s to get a standard view. The name and progress are shown over the camera picture.
+
+| Fingers | View | With the thumb out to the side as well |
+|---|---|---|
+| Index | Front | Rear |
+| Index + middle | Top | Bottom |
+| Index + middle + ring | Right | Left |
+| Index + little finger | Isometric | (same) |
+| Little finger | Fit all | (same) |
 
 - **Re-grip:** when your hand reaches the edge of the frame, open it, move it back and grab again, like lifting a mouse off the pad.
 - **After a zoom:** open both hands before starting the next gesture. Until then nothing moves, so letting go with one hand first does not spin the view.
 - **Orbit centre:** the view turns around whatever is under the centre of the 3D view, or around the middle of the model when nothing is there. To orbit around a particular part, pan it to the centre first.
-- **Level horizon:** orbit is a turntable around the model's Z axis. Set `Turntable` to `false` for a free trackball.
+- **Twist and push** start only after a deliberate movement (about 9°, or 10 % of the hand's apparent size), so ordinary orbiting and panning stay clean. While a twist is active, orbit waits.
+- **Level horizon:** orbit is a free trackball. Set `Turntable` to `true` to keep the horizon level around the model's Z axis; roll is then off.
 
 ## Install
 
@@ -41,7 +56,7 @@ The first time you switch HandNav on, the tracker sets itself up inside the inst
 ## Use
 
 1. Press the HandNav button (a hand) on the View toolbar, or View → HandNav.
-2. A HandNav panel appears in the FreeCAD window. It shows what the tracker is doing (on the first run, the installation progress), then the camera picture with the tracked hand points and the current mode (`ORBIT`, `PAN`, `ZOOM`). If the tracker fails, the reason is shown there. No other window opens.
+2. A HandNav panel appears in the FreeCAD window. It shows what the tracker is doing (on the first run, the installation progress), then the camera picture with the tracked hand points and the current mode (`ORBIT`, `ROLL`, `PAN`, `ZOOM` or a view name). If the tracker fails, the reason is shown there. No other window opens.
 3. The first time, macOS asks once whether HandNav Tracker may use the camera: allow it.
 4. Press the button again to stop.
 
@@ -58,10 +73,14 @@ Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entr
 | `Camera` | Integer | `-1` | Camera index. `-1` picks the Mac's built-in camera and avoids an iPhone Continuity Camera. |
 | `CameraName` | String | empty | Part of a camera name, e.g. `FUJIFILM`. Overrides `Camera`. |
 | `EmbedPreview` | Boolean | `true` | Show the preview in a FreeCAD panel. `false` opens a separate window instead. |
-| `Turntable` | Boolean | `true` | Keep the horizon level while orbiting. `false` rotates freely about the screen axes. |
+| `Turntable` | Boolean | `false` | Keep the horizon level while orbiting and ignore roll. `false` rotates freely about the screen axes. |
 | `OrbitGain` | Float | `4.0` | Orbit sensitivity, radians per frame height of hand travel. |
 | `PanGain` | Float | `1.5` | Pan sensitivity, view heights per frame height of hand travel. |
-| `ZoomGain` | Float | `1.5` | Zoom sensitivity (exponent). |
+| `ZoomGain` | Float | `1.5` | Two-hand zoom sensitivity (exponent). |
+| `PushGain` | Float | `2.0` | Sensitivity of zooming with the fist. |
+| `RollGain` | Float | `1.0` | Roll per twist; `1.0` turns the view as much as the hand. |
+| `InvertRoll`, `InvertPush` | Boolean | `false` | Reverse the roll or the fist zoom. |
+| `ViewGestures` | Boolean | `true` | React to raised fingers with standard views. |
 | `InvertX`, `InvertY` | Boolean | `false` | Reverse the orbit direction. |
 | `UseTerminal` | Boolean | `false` | Run the tracker in a Terminal window instead of the helper app. Terminal then needs the camera permission. |
 | `AutoStartTracker` | Boolean | `true` | Start the tracker with the button. With `false`, switch HandNav on first and then run `tracker/run_tracker.command` from the installed addon folder yourself. |
@@ -108,8 +127,8 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNa
 ## Limitations
 
 - macOS only: it uses a macOS helper app, AVFoundation and `system_profiler`.
-- One ordinary camera gives no real depth, so there are three motions (orbit, pan, zoom), not the six axes of a 3D mouse.
-- No roll around the view axis, no standard views and no object selection yet.
+- One ordinary camera gives no real depth: zooming with the fist is judged from the apparent size of the hand and is coarser than the other motions.
+- No object selection yet.
 - Gesture thresholds have been tuned on synthetic hand poses, not on a wide range of real hands.
 
 ## Development
