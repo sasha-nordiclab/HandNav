@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 (2026-11-25)
+
+- The tracker's installer prepares the libraries, so the first start no longer takes up to a minute.
+
 ## 0.9.0 (2026-11-25)
 
 - HandNav is a workbench of its own, in the namespaced `freecad/HandNav` layout. The button in every workbench is optional.

@@ -18,7 +18,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ "$1" = "--uninstall" ]; then
   # only what this installer and the addon put there
   cd "$DST" 2>/dev/null || { echo "The tracker is not installed."; exit 0; }
-  rm -rf .venv HandNavTracker.app
+  rm -rf .venv HandNavTracker.app .cache
   rm -f hand_tracker.py run_tracker.command requirements.txt VERSION hand_landmarker.task \
         args secret tracker.log .helper-ok .env-ok
   cd / && rmdir "$DST" 2>/dev/null || true
@@ -51,6 +51,15 @@ if [ ! -x .venv/bin/python ] || [ "$(cat .env-ok 2>/dev/null)" != "$want" ]; the
   echo "$want" > .env-ok
 fi
 .venv/bin/python hand_tracker.py --fetch-model
+# The first import builds a font index (matplotlib, which mediapipe needs) and takes up to a minute:
+# do it now instead of at the first start. It also proves that the libraries load.
+echo "Preparing the libraries, this can take a minute…"
+export MPLCONFIGDIR="$DST/.cache"
+.venv/bin/python -c "import cv2, mediapipe" 2>/dev/null || {
+  .venv/bin/python -c "import cv2, mediapipe" || true
+  echo "The tracker's libraries do not load. The installation is not complete." >&2
+  exit 1
+}
 
 # The windowless helper app that macOS grants the camera to. Its ad-hoc signature changes with every
 # build and macOS then asks again, so it is rebuilt only when its sources changed.

@@ -48,9 +48,9 @@ Raise fingers with the hand pointing up and hold still for about 0.3 s to get a 
    zsh path/to/Mod/HandNav/tracker/install.sh
    ```
 
-The tracker goes into `~/Library/Application Support/HandNav`. Its installer downloads and sets up:
+The last step prepares the libraries and can take a minute. The tracker goes into `~/Library/Application Support/HandNav`. Its installer downloads and sets up:
 
-- a Python environment of its own with `mediapipe` and its dependencies from PyPI (about 300 MB). With [uv](https://docs.astral.sh/uv/) installed it uses Python 3.12, which uv downloads if needed; otherwise the `python3` on your `PATH`, 3.10 or newer.
+- a Python environment of its own with `mediapipe` and its dependencies from PyPI (about 300 MB). With [uv](https://docs.astral.sh/uv/) installed it uses Python 3.12, which uv downloads if needed; otherwise the `python3` on your `PATH`, 3.9 or newer (the one from Apple's Command Line Tools will do).
 - the hand landmark model (about 8 MB) from Google's MediaPipe model storage, checked against a known SHA-256.
 - HandNav Tracker, a tiny windowless helper app compiled from `tracker/helper.c`. This needs Apple's Command Line Tools (`xcode-select --install`). Without them the tracker runs in a Terminal window.
 

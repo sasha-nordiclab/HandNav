@@ -9,6 +9,7 @@
 cd "${0:A:h}" || exit 1
 # FreeCAD points these into its own bundle; they must not reach the tracker's Python.
 unset PYTHONHOME PYTHONPATH PREFIX LD_LIBRARY_PATH SSL_CERT_FILE GIT_SSL_CAINFO FONTCONFIG_FILE FONTCONFIG_PATH
+export MPLCONFIGDIR="$PWD/.cache"   # filled by install.sh
 pause() { [ -t 0 ] && { echo "You can close this window."; read -k 1; }; return 0; }   # only in a terminal
 
 if [ ! -x .venv/bin/python ]; then
