@@ -36,7 +36,7 @@ Raise fingers with the hand pointing up and hold still for about 0.3 s to get a 
 - **Re-grip:** when your hand reaches the edge of the picture, open it, move it back and grab again, like lifting a mouse off the pad.
 - **Orbit centre:** the view turns around whatever is under the centre of the 3D view, or around the middle of the model when nothing is there.
 - **Twist and push** start only after a deliberate movement (about 9°, or 10 % of the hand's apparent size). While they are active, orbit waits.
-- **Touching your face:** a hand on the face is ignored (red points, `FACE` in the panel), so scratching your nose or leaning on your hand moves nothing. It is told apart by size: a hand held out in front of the face towards the camera looks larger and still works. If it gets in the way, adjust "Near the face" in the sliders or switch it off in the settings.
+- **Touching your face:** a hand on the face is ignored (red points, `FACE` in the panel), so scratching your nose or leaning on your hand moves nothing. It is told apart by scale: a hand on the face is as far from the camera as the face, a hand held nearer to the camera works, also in front of the face. The panel shows the measured value and the limit. If it gets in the way, adjust "Near the face" in the sliders or switch it off in the settings.
 - **Level horizon:** orbit is a free trackball. "Keep the horizon level" in the settings makes it a turntable; roll is then off.
 - **Two hands** (optional, in the settings): pinch with both hands and move them apart or together to zoom, or turn them like a wheel to roll. Open both hands before the next gesture. Two open palms held up for about 2 s fit all.
 

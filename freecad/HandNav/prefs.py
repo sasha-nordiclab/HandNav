@@ -24,8 +24,8 @@ SPEC = [
         ("TwoHands", "bool", False, "Two-hand gestures as well",
          "Also follows the second hand: zoom by moving two pinches apart. Slower."),
         ("FaceGuard", "bool", True, "Ignore a hand that touches the face",
-         "Scratching your nose or leaning on your hand moves nothing. A hand held out in front of the\n"
-         "face towards the camera still works. The panel shows FACE while a hand is ignored."),
+         "Scratching your nose or leaning on your hand moves nothing. A hand held nearer to the camera\n"
+         "than the face still works, also in front of it. The panel shows FACE while a hand is ignored."),
         ("Turntable", "bool", False, "Keep the horizon level",
          "Orbit around the model's vertical axis. Roll is ignored then."),
     ]),
@@ -48,9 +48,10 @@ SPEC = [
         ("MinHandSize", "float", 0.12, "Smallest hand",
          "Palm size as a part of the picture height. Smaller (more distant) hands are ignored; 0 accepts all.\n"
          "The panel shows TOO SMALL with the measured size.", 0.0, 0.6, 0.01),
-        ("FaceRatio", "float", 0.85, "Hand size at the face",
-         "A hand over the face is ignored while its palm is smaller than this part of the face height.\n"
-         "Smaller lets hands close to the face through, larger ignores more.", 0.5, 1.5, 0.05),
+        ("FaceRatio", "float", 0.70, "Hand size at the face",
+         "A hand over the face is ignored while it is seen at the same scale, i.e. its palm is smaller than\n"
+         "this part of the face height (a hand on the face: about 0.55). The panel shows the measured value.\n"
+         "Smaller lets hands close to the face through, larger ignores more.", 0.4, 1.2, 0.02),
         ("Pinch", "float", 0.30, "Pinch distance",
          "How close thumb and finger must come. Smaller is stricter, larger triggers more easily.", 0.10, 0.60, 0.02),
         ("Fist", "float", 0.90, "Fist tightness",

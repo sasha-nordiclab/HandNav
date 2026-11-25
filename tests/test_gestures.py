@@ -454,7 +454,7 @@ class AccelerationTest(unittest.TestCase):
 
 
 class FaceGuardTest(unittest.TestCase):
-    FACE = (0.4, 0.3, 0.16, 0.16)      # x, y, w, h; a hand at the same distance has a palm of about 0.10
+    FACE = (0.4, 0.3, 0.18, 0.18)      # x, y, w, h; a hand at the same distance has a palm of about 0.10
 
     def _guard(self, now=0.0):
         guard = ht.FaceGuard()
@@ -467,8 +467,30 @@ class FaceGuardTest(unittest.TestCase):
         self.assertEqual(self._guard().filter([hand(0.48, 0.50, "fist")], 0.1, False), [])    # chin, neck
 
     def test_hand_held_out_in_front_of_the_face_counts(self):
-        near = scaled(hand(0.48, 0.38, "pinch"), 1.8)
+        near = scaled(hand(0.48, 0.38, "pinch"), 1.5)
         self.assertEqual(self._guard().filter([near], 0.1, False), [near])
+
+    def test_only_the_same_scale_is_ignored_whatever_the_pose(self):
+        on, size = hand(0.48, 0.38, "fist"), self.FACE[3]
+        for ratio, counts in ((0.45, False), (0.55, False), (0.65, False), (0.80, True), (1.2, True)):
+            got = self._guard().filter([on], 0.1, False, lambda pts: ratio * size)
+            self.assertEqual(got, [on] if counts else [], ratio)
+
+    def test_true_palm_does_not_depend_on_the_pose(self):
+        # the same metric hand seen at the same scale, palm on and tilted: the picture shrinks alike
+        metric = [(x - 0.5, y - 0.5) for x, y in hand(0.5, 0.5, "open")]
+        tilted = [(x, y * 0.4) for x, y in metric]
+        for world in (metric, tilted):
+            pts = [(0.3 + 2 * x, 0.6 + 2 * y) for x, y in world]
+            self.assertAlmostEqual(ht.true_palm(pts, world), 2 * ht.PALM_METRES)
+        self.assertEqual(ht.true_palm(hand(0.5, 0.5, "open"), []), ht.palm_size(hand(0.5, 0.5, "open")))
+
+    def test_hand_moved_towards_the_camera_counts_at_once(self):
+        guard, on = self._guard(), hand(0.48, 0.38, "pinch")
+        size = lambda r: (lambda pts: r * self.FACE[3])   # noqa: E731
+        guard.filter([on], 0.1, False, size(0.55))
+        guard.filter([on], 0.2, False, size(0.9))
+        self.assertEqual(guard.filter([on], 0.4, False, size(0.9)), [on])
 
     def test_hand_beside_the_face_counts(self):
         for x in (0.1, 0.9):

@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ICONS = os.path.join(HERE, "resources", "icons")
 # The tracker is a separate program that the user installs with tracker/install.sh.
 TRACKER_DIR = os.path.expanduser("~/Library/Application Support/HandNav")
-TRACKER_VERSION = "4"   # must match tracker/VERSION
+TRACKER_VERSION = "5"   # must match tracker/VERSION
 INSTALLER = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tracker", "install.sh")
 HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")
 TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker

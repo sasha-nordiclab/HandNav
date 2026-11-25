@@ -140,6 +140,20 @@ def palm_size(pts):
     return max(_d(pts[0], pts[9]), _d(pts[5], pts[17]))
 
 
+PALM_METRES = 0.095   # metres from wrist to middle knuckle, adult hand
+
+
+def true_palm(pts, world):
+    """Palm size in picture heights as if the palm faced the camera, whatever the pose: from the
+    scale between the picture and the hand's metric shape (world: 21 (x, y) points in metres)."""
+    def spread(points):
+        cx, cy = sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
+        return math.sqrt(sum((p[0] - cx) ** 2 + (p[1] - cy) ** 2 for p in points) / len(points))
+
+    metres = spread(world) if world else 0.0
+    return spread(pts) / metres * PALM_METRES if metres > 0.005 else palm_size(pts)
+
+
 def big_enough(pts, min_size, busy):
     """A far-away (small) hand does not count; a running gesture may shrink a little further."""
     return palm_size(pts) >= min_size * (0.75 if busy else 1.0)
@@ -149,17 +163,18 @@ class FaceGuard:
     """Ignores a hand that touches the face (scratching, leaning on it, adjusting glasses).
 
     A hand on the face is over the face in the picture and about as far from the camera as the
-    face, so its palm is clearly smaller than the face. A hand held out in front of the face
-    towards the camera looks larger and still counts."""
+    face, so both are seen at the same scale: the palm is about 0.55 of the face height. A hand held
+    out in front of the face, nearer to the camera, is seen at a larger scale and still counts."""
 
     KEEP = 1.0          # seconds a face is remembered when it is not detected any more ...
     KEEP_COVERED = 15.0   # ... and while a hand is over it, which hides it from the detector
-    ENTER, LEAVE = 0.3, 0.3   # seconds before a running gesture is stopped / a hand counts again
+    ENTER, LEAVE = 0.3, 0.15   # seconds before a running gesture is stopped / a hand counts again
 
-    def __init__(self, ratio=0.85):
+    def __init__(self, ratio=0.70):
         self.ratio = ratio
         self._faces, self._seen, self._covered = [], -1e9, -1e9
         self._since, self._clear, self.blocking = None, None, False
+        self.over, self.plain, self.heights = [], [], []   # measurements since the last report
         self.measured = None   # palm size / face height of the last hand over a face
 
     def faces(self, boxes, now):
@@ -171,27 +186,30 @@ class FaceGuard:
         """The face found last, while it is remembered."""
         return self._faces[0] if self._faces and now - self._seen <= self.KEEP_COVERED else None
 
-    def touching(self, pts, now):
+    def touching(self, pts, now, size=None):
         if now - max(self._seen, min(self._covered, self._seen + self.KEEP_COVERED)) > self.KEEP:
             self._faces = []
-        size, over = palm_size(pts), False
-        limit = self.ratio * (1.15 if self.blocking else 1.0)
-        touch = False
+        size, over = palm_size(pts) if size is None else size, False
+        limit = self.ratio * (1.06 if self.blocking else 1.0)
+        touch, self.measured = False, None
         for x, y, w, h in self._faces:
             # with hair, ears, chin and neck
             inside = sum(x - 0.3 * w <= px <= x + 1.3 * w and y - 0.45 * h <= py <= y + 1.4 * h for px, py in pts)
             if inside >= 3:
                 over, self.measured = True, size / h
+                self.over.append(self.measured)
+                self.plain.append(palm_size(pts) / h)
+                self.heights.append(h)
                 touch = touch or size < limit * h
         if over:
             self._covered = now
         return touch
 
-    def filter(self, hands, now, busy):
-        """The hands that count. busy: a gesture is in progress."""
+    def filter(self, hands, now, busy, size=palm_size):
+        """The hands that count. busy: a gesture is in progress, size(pts): palm size of a hand."""
         if len(hands) != 1:
-            return [pts for pts in hands if not self.touching(pts, now)]
-        if self.touching(hands[0], now):
+            return [pts for pts in hands if not self.touching(pts, now, size(pts))]
+        if self.touching(hands[0], now, size(hands[0])):
             self._clear = None
             self._since = now if self._since is None else self._since
             # nothing starts at the face; a gesture that merely passes over it goes on for a moment
@@ -742,6 +760,14 @@ def ensure_model(say=print, which="hand"):
         raise RuntimeError("the downloaded %s model does not match its checksum" % what)
 
 
+def span(values):
+    """Low, middle and high of a list of measurements, for the log."""
+    if not values:
+        return "-"
+    v = sorted(values)
+    return "%.2f %.2f %.2f" % (v[len(v) // 10], v[len(v) // 2], v[len(v) * 9 // 10])
+
+
 def list_cameras():
     """[(name, unique_id)] in OpenCV's index order (AVFoundation devices sorted by unique ID).
     None when the list could not be read, [] when there is no camera."""
@@ -796,7 +822,7 @@ def main():
     ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
     ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before push zoom starts")
     ap.add_argument("--no-face-guard", action="store_true", help="do not ignore a hand that touches the face")
-    ap.add_argument("--face-ratio", type=float, default=0.85,
+    ap.add_argument("--face-ratio", type=float, default=0.70,
                     help="a hand over the face is ignored while its palm is smaller than this part of the face height")
     ap.add_argument("--min-hand", type=float, default=0.12,
                     help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
@@ -1048,6 +1074,8 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         found = [([(p.x * w / h, p.y) for p in lms], side[0].score)
                  for lms, side in zip(res.hand_landmarks, res.handedness)]
         hands = [pts for pts, score in found if plausible(pts, score)]
+        palms = {id(pts): true_palm(pts, [(p.x, p.y) for p in wl])
+                 for (pts, _), wl in zip(found, res.hand_world_landmarks)}
         shown = hands
         hands = [pts for pts in shown if big_enough(pts, args.min_hand, g.mode != "idle")]
         small = shown if shown and not hands else []
@@ -1064,8 +1092,11 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
                                      for d in r.detections], now)
                         break
         at_face = []
+        if guard is not None:
+            guard.measured = None
         if guard is not None and hands:
-            at_face, hands = hands, guard.filter(hands, now, g.mode != "idle")
+            at_face, hands = hands, guard.filter(hands, now, g.mode != "idle",
+                                                 lambda pts: palms.get(id(pts)) or palm_size(pts))
             at_face = [pts for pts in at_face if pts not in hands]
         misfits = misfits + 1 if found and not hands and not at_face else 0
         if misfits >= (15 if small else 5):
@@ -1089,13 +1120,15 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         had = bool(hands)
         if now - stats["t"] >= 10:
             out("%.0f fps at %dx%d, hand in %d%% of frames, found again %d times, %d false detections, "
-                "too small in %d%%, at the face in %d%%, mean palm size %.2f, face seen: %s, last palm / face over it: %s"
+                "too small in %d%%, at the face in %d%%, mean palm size %.2f, face seen: %s, palm / face over it: %s (plain %s, face %s)"
                 % (stats["frames"] / (now - stats["t"]), w, h, 100 * stats["hand"] // stats["frames"],
                    stats["returns"], stats["rejected"],
                    100 * stats["small"] // stats["frames"],
                    100 * stats["face"] // stats["frames"], stats["size_sum"] / max(stats["size_n"], 1),
                    "yes" if guard is not None and now - guard._seen < 2 else "no",
-                   "%.2f" % guard.measured if guard is not None and guard.measured else "-"))
+                   *([span(guard.over), span(guard.plain), span(guard.heights)] if guard is not None else "---")))
+            if guard is not None:
+                guard.over, guard.plain, guard.heights = [], [], []
             stats = dict.fromkeys(stats, 0)
             stats["t"] = now
         for pkt in g.update(hands, now):
@@ -1113,7 +1146,9 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
                     cv2.circle(frame, (int(x * h), int(y * h)), int(2 * unit), (90, 90, 230), -1)
             label = g.label if not small else "TOO SMALL %.2f < %.2f" % (palm_size(small[0]), args.min_hand)
             if at_face:
-                label = "FACE"
+                label = "FACE" + (" %.2f < %.2f" % (guard.measured, guard.ratio) if guard.measured else "")
+            elif guard is not None and guard.measured and hands and g.mode == "idle":
+                label += "  face %.2f" % guard.measured   # over the face, but nearer to the camera
             cv2.putText(frame, label, (int(12 * unit), int(34 * unit)), cv2.FONT_HERSHEY_SIMPLEX, unit,
                         colors[g.mode], int(2 * unit))
         if args.embed:
