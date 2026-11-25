@@ -331,6 +331,48 @@ class OneHandZoomTest(unittest.TestCase):
         self.assertEqual(feed(g, [[p]] * 60), [{"t": "view", "v": "fit"}])
 
 
+class RobustnessTest(unittest.TestCase):
+    def test_hand_poses_are_plausible(self):
+        for kind in ("open", "relaxed", "fist", "pinch", "natural_pinch", "gap"):
+            self.assertTrue(ht.plausible(hand(0.5, 0.5, kind), 0.9), kind)
+        for raised, thumb, name in ViewTest.CASES:
+            self.assertTrue(ht.plausible(fingers(0.5, 0.5, raised, thumb), 0.9), name)
+
+    def test_false_hands_are_rejected(self):
+        good = hand(0.5, 0.5, "open")
+        self.assertFalse(ht.plausible(good, 0.4))
+        self.assertFalse(ht.plausible(scaled(good, 0.2), 0.9))
+        stretched = list(good)
+        stretched[8] = (1.2, 0.1)
+        self.assertFalse(ht.plausible(stretched, 0.9))
+
+    def test_picker_keeps_the_hand_of_a_running_gesture(self):
+        k, a, b = ht.HandPicker(), hand(0.3, 0.6, "pinch"), hand(0.9, 0.3, "open")
+        self.assertEqual(k.pick([a], 0.0, False), [a])
+        self.assertEqual(k.pick([b, a], 0.03, True), [a])
+        self.assertEqual(k.pick([b], 0.06, True), [])      # a is lost: do not jump to b
+        self.assertEqual(k.pick([b], 1.0, False), [b])
+
+    def test_picker_prefers_the_raised_hand_when_idle(self):
+        k, desk, raised = ht.HandPicker(), hand(0.3, 0.9, "open"), hand(0.8, 0.4, "open")
+        k.pick([desk], 0.0, False)
+        self.assertEqual(k.pick([desk, raised], 0.03, False), [raised])
+
+    def test_gesture_survives_a_short_loss_without_a_jump(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "pinch")]] * 5)
+        pk = feed(g, [[]] * 5 + [[hand(0.62, 0.5, "pinch")]] * 5)
+        self.assertEqual(pk, [])
+        self.assertEqual(g.mode, "orbit")
+        pk = feed(g, [[hand(0.62 + 0.01 * i, 0.5, "pinch")] for i in range(6)])
+        self.assertIn("orbit", kinds(pk))
+
+    def test_gesture_ends_when_the_hand_is_gone(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "pinch")]] * 5)
+        self.assertEqual(feed(g, [[]] * 20), [{"t": "mode", "m": "idle"}])
+
+
 class SqueezeTest(unittest.TestCase):
     FIST, OPEN = [[hand(0.5, 0.5, "fist")]], [[hand(0.5, 0.5, "open")]]
 

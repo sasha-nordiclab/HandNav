@@ -20,7 +20,7 @@ Gestures work like grabbing the model: the view follows your hand while the gest
 | Squeeze a fist twice, quickly and in place | Fit all |
 | Open or relaxed hand, or no hand in view | Pause |
 
-One hand does everything: a pinch rotates about three axes and a fist moves along three, like a 3D mouse. Use either hand; keep the other one out of the picture.
+One hand does everything: a pinch rotates about three axes and a fist moves along three, like a 3D mouse. Use either hand, and keep the other one out of the picture: only one is followed.
 
 With `TwoHands` set to `true` the tracker follows both hands and adds: pinch with both hands and move them apart or together to zoom, or turn them like a wheel to roll.
 
@@ -100,6 +100,8 @@ Tracker options (`tracker/hand_tracker.py --help`):
 - `--pinch` (default 0.30): how close thumb and index must be to count as a pinch, as a fraction of the palm size. Smaller is stricter.
 - `--fist` (default 0.90): how far the fingertips must be pulled back to count as a fist. Smaller needs a tighter fist.
 - `--smooth` (default 0.5, range 0.05 to 1): motion smoothing. Smaller is smoother and slower.
+- `--confidence` (default 0.4): how sure the detector must be. Smaller keeps hold of the hand better against a face or a busy background, at the price of more false hands.
+- `--width` (default 960): width of the analysed picture. Larger helps when the hand is far away, smaller is faster.
 - `--view-hold` (default 0.3): how many seconds raised fingers must be held still for a standard view.
 
 The gesture thresholds are first estimates: tune `--pinch` and `--fist` if a gesture triggers too easily or not at all.
@@ -129,6 +131,7 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNa
 - **A Terminal window opens.** The helper app was not built. Install the Command Line Tools and run `./install.sh` again, and check that `UseTerminal` is not set.
 - **Wrong camera.** Set `Camera` or `CameraName` (see Settings) and switch HandNav off and on.
 - **"Port … is busy".** HandNav is already on in another FreeCAD window, or another program uses the port. Set a different `Port`.
+- **The hand is lost near the face or against a busy background.** A gesture survives a loss of up to 0.25 s, and detections that do not look like a hand are dropped. If it still gets lost, lower `--confidence`, add light from the front, and hold the hand beside the face rather than in front of it. Every 10 s `tracker.log` records the frame rate and how often the hand was lost.
 - **Gestures trigger too easily or not at all.** Tune `--pinch` and `--fist` through `TrackerArgs`, and keep the whole hand in the frame with reasonable light.
 
 ## Limitations

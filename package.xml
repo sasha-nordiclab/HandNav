@@ -2,7 +2,7 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>HandNav</name>
   <description>Orbit, roll, pan and zoom the 3D view with hand gestures seen by a webcam (macOS).</description>
-  <version>0.5.0</version>
+  <version>0.6.0</version>
   <date>2026-11-25</date>
   <maintainer>sasha_nordiclab</maintainer>
   <license file="LICENSE">MIT</license>

@@ -119,6 +119,45 @@ def size_of(pts):
     return math.log(max(_d(pts[0], pts[9]), _d(pts[5], pts[17]), 1e-3))
 
 
+def plausible(pts, score):
+    """False for detections that are no usable hand (often a face or clutter)."""
+    length, width = _d(pts[0], pts[9]), _d(pts[5], pts[17])
+    palm = max(length, width)
+    # bones of a hand are comparable to its palm; a misfit stretches or collapses
+    longest = max(_d(pts[i], pts[i + 1]) for i in (5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19))
+    return score >= 0.55 and 0.04 <= palm <= 0.9 and longest < 1.3 * palm
+
+
+class HandPicker:
+    """One-hand mode: stay with the working hand when a second hand (or a face) is detected too."""
+
+    NEAR, FORGET = 0.3, 0.4
+
+    def __init__(self):
+        self._at, self._seen = None, -1e9
+
+    def pick(self, hands, now, busy):
+        """hands: plausible hands; busy: a gesture is in progress. Returns [] or [hand]."""
+        if now - self._seen > self.FORGET:
+            self._at = None
+        best, best_key = None, None
+        for pts in hands:
+            c = classify(pts)[1]
+            near = self._at is not None and _d(c, self._at) < self.NEAR
+            if busy and self._at is not None:
+                if not near:
+                    continue       # never hand a running gesture over to another hand
+                key = _d(c, self._at)
+            else:
+                key = c[1] - (0.15 if near else 0.0)   # the raised hand, with a bonus for the current one
+            if best is None or key < best_key:
+                best, best_key = pts, key
+        if best is None:
+            return []
+        self._at, self._seen = classify(best)[1], now
+        return [best]
+
+
 class Axis:
     """A secondary motion (twist, push) that only engages on a deliberate movement, so that plain
     orbiting or panning does not leak into it, and lets go again when the movement ends."""
@@ -183,6 +222,7 @@ class Gestures:
         self._prev = None     # smoothed value at the last emitted packet
         self.view_hold = min(max(view_hold, 0.1), 3.0)
         self._now = 0.0
+        self._lost_at = None      # since when no hand is detected during a gesture
         self._idle_since = None   # since when hands are in view without any gesture
         self._pose, self._pose_at, self._pose_t, self._pose_n = None, None, 0.0, 0
         self._pose_miss, self._pose_done = 0, False
@@ -199,7 +239,8 @@ class Gestures:
     SQUEEZE = (0.05, 0.45)      # seconds a squeeze may last; a longer fist is a pan
     SQUEEZE_GAP = (0.05, 0.50)  # seconds the hand is open between the two
     SQUEEZE_STILL = 0.12
-    MEMORY = 4        # frames a hand keeps its held gesture while undetected
+    LOST = 0.25       # seconds a gesture survives while no hand is detected
+    MEMORY = 8        # frames a hand keeps its held gesture while undetected
     MATCH = 0.25      # how far a hand can move between frames and still be the same hand
 
     def _match(self, centers):
@@ -243,6 +284,15 @@ class Gestures:
         return self._motion(hands, hands_pts) + ([{"t": "view", "v": "fit"}] if self._squeeze(hands) else [])
 
     def _motion(self, hands, hands_pts):
+        if not hands_pts and self.mode not in ("idle", "zoom"):
+            if self._lost_at is None:
+                self._lost_at = self._now
+            if self._now - self._lost_at < self.LOST:
+                return []
+        elif self._lost_at is not None and hands_pts:
+            if self._now - self._lost_at > 0.1:
+                self._raw = None   # it moved unseen: go on from where it is now, without a jump
+            self._lost_at = None
         pinch = [pts for (g, _), pts in zip(hands, hands_pts) if g == "pinch"]
         fists = {c: pts for (g, c), pts in zip(hands, hands_pts) if g == "fist"}
         fist = list(fists)
@@ -283,7 +333,7 @@ class Gestures:
         if val is None:
             return []
 
-        if _d(val, self._raw) > self.max_jump:
+        if self._raw is None or _d(val, self._raw) > self.max_jump:
             # tracking jumped to the other hand or glitched: re-anchor instead of moving the view
             self._raw = self._s = self._prev = val
             self._reset_axes()
@@ -403,7 +453,7 @@ class Gestures:
             self._latch, self._calm, new, val = True, 0, "idle", None
         if new == self.mode:
             return []
-        self.mode = new
+        self.mode, self._lost_at = new, None
         self._reset_axes()
         self._raw = self._s = self._prev = val
         return [{"t": "mode", "m": "zoom" if new == "lift" else new}]
@@ -539,6 +589,8 @@ def main():
     ap.add_argument("--pinch", type=float, default=0.30, help="pinch threshold (smaller = stricter)")
     ap.add_argument("--fist", type=float, default=0.90, help="fist threshold (smaller = tighter fist needed)")
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
+    ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
+    ap.add_argument("--width", type=int, default=960, help="width of the picture that is analysed")
     ap.add_argument("--view-hold", type=float, default=0.3, help="seconds raised fingers must be held still")
     args = ap.parse_args()
 
@@ -630,6 +682,38 @@ def main():
         finish("unexpected error: %s: %s" % (type(e).__name__, e), ok=False)
 
 
+class Camera:
+    """Reads frames in the background, so that analysing one and waiting for the next overlap."""
+
+    def __init__(self, cap):
+        self._cap, self._frame, self._seq, self._stop = cap, None, 0, False
+        self._cond = threading.Condition()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop:
+            ok, frame = self._cap.read()
+            if not ok:
+                time.sleep(0.02)
+                continue
+            with self._cond:
+                self._frame, self._seq = frame, self._seq + 1
+                self._cond.notify()
+
+    def next(self, seen, timeout=0.1):
+        """(sequence number, newest frame) newer than `seen`, or (seen, None) after the timeout."""
+        with self._cond:
+            if self._cond.wait_for(lambda: self._seq > seen, timeout):
+                return self._seq, self._frame
+        return seen, None
+
+    def release(self):
+        self._stop = True
+        self._thread.join(1.0)
+        self._cap.release()
+
+
 def run(args, link, stop, should_stop, say, finish, starting):
     """Load everything, open the camera and track until told to stop."""
     say("Loading the hand tracker…")
@@ -642,8 +726,11 @@ def run(args, link, stop, should_stop, say, finish, starting):
         ensure_model(say)
         landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
-            running_mode=vision.RunningMode.VIDEO, num_hands=2 if args.two_hands else 1,
-            min_hand_detection_confidence=0.6, min_tracking_confidence=0.6))
+            running_mode=vision.RunningMode.VIDEO, # one hand: once found it is only followed, without searching the whole picture every frame,
+            # which is what takes the time
+            num_hands=2 if args.two_hands else 1,
+            min_hand_detection_confidence=args.confidence, min_hand_presence_confidence=args.confidence,
+            min_tracking_confidence=args.confidence))
     except Exception as e:
         finish("could not load the hand landmark model (%s)" % e, ok=False)
     if should_stop():
@@ -665,8 +752,8 @@ def run(args, link, stop, should_stop, say, finish, starting):
         if should_stop():
             finish(stop["why"])
         cap = cv2.VideoCapture(cam_index, cv2.CAP_AVFOUNDATION)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         ok, _ = cap.read()
         if ok:
             break
@@ -686,38 +773,65 @@ def run(args, link, stop, should_stop, say, finish, starting):
     starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
+    picker, had = HandPicker(), False
+    stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0}
     draw = args.embed or not args.no_preview
     window = draw and not args.embed
     say("Running on %s" % cam_name)
     out("Pinch: orbit, twist: roll, fist: pan, thumb + middle finger up/down: zoom, raised fingers: views. Stop: %s."
         % ("q in the preview window, or Ctrl+C here" if window else "the HandNav button in FreeCAD, or Ctrl+C here"))
     n, ts, t0, bad_since = 0, -1, time.monotonic(), None
+    cap, seq, misfits = Camera(cap), 0, 0
     while not should_stop():
-        ok, frame = cap.read()
-        if not ok:
+        seq, frame = cap.next(seq)
+        if frame is None:
             now = time.monotonic()
             bad_since = bad_since or now
             if now - bad_since > 10:
                 finish("%s stopped delivering frames" % cam_name, ok=False, cap=cap)
-            time.sleep(0.05)
             continue
         bad_since = None
         h, w = frame.shape[:2]
-        if w > 640:
-            frame = cv2.resize(frame, (640, int(h * 640 / w)))
+        if w > args.width:
+            frame = cv2.resize(frame, (args.width, int(h * args.width / w)), interpolation=cv2.INTER_LINEAR)
             h, w = frame.shape[:2]
         frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         ts = max(ts + 1, int((time.monotonic() - t0) * 1000))   # must be strictly increasing
         res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
-        hands = [[(p.x * w / h, p.y) for p in lms] for lms in res.hand_landmarks]
-        for pkt in g.update(hands, time.monotonic()):
+        now = time.monotonic()
+        found = [([(p.x * w / h, p.y) for p in lms], side[0].score)
+                 for lms, side in zip(res.hand_landmarks, res.handedness)]
+        hands = [pts for pts, score in found if plausible(pts, score)]
+        misfits = misfits + 1 if found and not hands else 0
+        if misfits >= 5:
+            # something that is no hand (a face, say) is being followed: an empty picture makes the
+            # tracker drop it and search again
+            misfits, ts = 0, ts + 1
+            landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb * 0), ts)
+        if not args.two_hands:
+            hands = picker.pick(hands, now, g.mode != "idle")
+        stats["frames"] += 1
+        stats["hand"] += bool(hands)
+        stats["rejected"] += len(found) - sum(plausible(*f) for f in found)
+        if hands and not had:
+            stats["returns"] += 1
+        had = bool(hands)
+        if now - stats["t"] >= 10:
+            out("%.0f fps at %dx%d, hand in %d%% of frames, found again %d times, %d false detections"
+                % (stats["frames"] / (now - stats["t"]), w, h, 100 * stats["hand"] // stats["frames"],
+                   stats["returns"], stats["rejected"]))
+            stats = dict.fromkeys(stats, 0)
+            stats["t"] = now
+        for pkt in g.update(hands, now):
             link.packet(**pkt)
         if draw:
-            for lms in res.hand_landmarks:
-                for p in lms:
-                    cv2.circle(frame, (int(p.x * w), int(p.y * h)), 3, colors[g.mode], -1)
-            cv2.putText(frame, g.label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, colors[g.mode], 2)
+            unit = w / 640
+            for pts in hands:   # only the hands that count
+                for x, y in pts:
+                    cv2.circle(frame, (int(x * h), int(y * h)), int(3 * unit), colors[g.mode], -1)
+            cv2.putText(frame, g.label, (int(12 * unit), int(34 * unit)), cv2.FONT_HERSHEY_SIMPLEX, unit,
+                        colors[g.mode], int(2 * unit))
         if args.embed:
             n += 1
             if n % 2 == 0:  # ~15 fps is plenty for a preview
