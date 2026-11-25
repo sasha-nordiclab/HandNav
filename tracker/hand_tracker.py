@@ -128,6 +128,16 @@ def plausible(pts, score):
     return score >= 0.55 and 0.04 <= palm <= 0.9 and longest < 1.3 * palm
 
 
+def palm_size(pts):
+    """Palm size as a fraction of the picture height."""
+    return max(_d(pts[0], pts[9]), _d(pts[5], pts[17]))
+
+
+def big_enough(pts, min_size, busy):
+    """A far-away (small) hand does not count; a running gesture may shrink a little further."""
+    return palm_size(pts) >= min_size * (0.75 if busy else 1.0)
+
+
 class HandPicker:
     """One-hand mode: stay with the working hand when a second hand (or a face) is detected too."""
 
@@ -589,6 +599,8 @@ def main():
     ap.add_argument("--pinch", type=float, default=0.30, help="pinch threshold (smaller = stricter)")
     ap.add_argument("--fist", type=float, default=0.90, help="fist threshold (smaller = tighter fist needed)")
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
+    ap.add_argument("--min-hand", type=float, default=0.12,
+                    help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
     ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
     ap.add_argument("--width", type=int, default=960, help="width of the picture that is analysed")
     ap.add_argument("--view-hold", type=float, default=0.3, help="seconds raised fingers must be held still")
@@ -774,7 +786,8 @@ def run(args, link, stop, should_stop, say, finish, starting):
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     picker, had = HandPicker(), False
-    stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0}
+    stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0,
+             "small": 0, "size_sum": 0.0, "size_n": 0}
     draw = args.embed or not args.no_preview
     window = draw and not args.embed
     say("Running on %s" % cam_name)
@@ -803,9 +816,12 @@ def run(args, link, stop, should_stop, say, finish, starting):
         found = [([(p.x * w / h, p.y) for p in lms], side[0].score)
                  for lms, side in zip(res.hand_landmarks, res.handedness)]
         hands = [pts for pts, score in found if plausible(pts, score)]
+        shown = hands
+        hands = [pts for pts in shown if big_enough(pts, args.min_hand, g.mode != "idle")]
+        small = shown if shown and not hands else []
         misfits = misfits + 1 if found and not hands else 0
-        if misfits >= 5:
-            # something that is no hand (a face, say) is being followed: an empty picture makes the
+        if misfits >= (15 if small else 5):
+            # something that is no hand (a face, say) or too small is being followed: an empty picture makes the
             # tracker drop it and search again
             misfits, ts = 0, ts + 1
             landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb * 0), ts)
@@ -813,14 +829,21 @@ def run(args, link, stop, should_stop, say, finish, starting):
             hands = picker.pick(hands, now, g.mode != "idle")
         stats["frames"] += 1
         stats["hand"] += bool(hands)
+        stats["small"] += bool(small)
+        if shown:
+            size = palm_size(shown[0])
+            stats["size_sum"] += size
+            stats["size_n"] += 1
         stats["rejected"] += len(found) - sum(plausible(*f) for f in found)
         if hands and not had:
             stats["returns"] += 1
         had = bool(hands)
         if now - stats["t"] >= 10:
-            out("%.0f fps at %dx%d, hand in %d%% of frames, found again %d times, %d false detections"
+            out("%.0f fps at %dx%d, hand in %d%% of frames, found again %d times, %d false detections, "
+                "too small in %d%%, mean palm size %.2f"
                 % (stats["frames"] / (now - stats["t"]), w, h, 100 * stats["hand"] // stats["frames"],
-                   stats["returns"], stats["rejected"]))
+                   stats["returns"], stats["rejected"],
+                   100 * stats["small"] // stats["frames"], stats["size_sum"] / max(stats["size_n"], 1)))
             stats = dict.fromkeys(stats, 0)
             stats["t"] = now
         for pkt in g.update(hands, now):
@@ -830,7 +853,11 @@ def run(args, link, stop, should_stop, say, finish, starting):
             for pts in hands:   # only the hands that count
                 for x, y in pts:
                     cv2.circle(frame, (int(x * h), int(y * h)), int(3 * unit), colors[g.mode], -1)
-            cv2.putText(frame, g.label, (int(12 * unit), int(34 * unit)), cv2.FONT_HERSHEY_SIMPLEX, unit,
+            for pts in small:   # seen, but ignored: grey, with its size
+                for x, y in pts:
+                    cv2.circle(frame, (int(x * h), int(y * h)), int(2 * unit), (120, 120, 120), -1)
+            label = g.label if not small else "TOO SMALL %.2f < %.2f" % (palm_size(small[0]), args.min_hand)
+            cv2.putText(frame, label, (int(12 * unit), int(34 * unit)), cv2.FONT_HERSHEY_SIMPLEX, unit,
                         colors[g.mode], int(2 * unit))
         if args.embed:
             n += 1

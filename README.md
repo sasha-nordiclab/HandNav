@@ -85,6 +85,7 @@ Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entr
 | `PushGain` | Float | `2.0` | Sensitivity of zooming with the fist. |
 | `RollGain` | Float | `1.0` | Roll per twist; `1.0` turns the view as much as the hand. |
 | `InvertRoll`, `InvertPush` | Boolean | `false` | Reverse the roll or the fist zoom. |
+| `MinHandSize` | Float | `0.12` | Ignore hands whose palm is smaller than this part of the picture height, i.e. too far from the camera. `0` switches the limit off. |
 | `TwoHands` | Boolean | `false` | Track two hands and enable the two-hand gestures. |
 | `ViewGestures` | Boolean | `true` | React to raised fingers with standard views. |
 | `InvertX`, `InvertY` | Boolean | `false` | Reverse the orbit direction. |
@@ -132,6 +133,7 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNa
 - **Wrong camera.** Set `Camera` or `CameraName` (see Settings) and switch HandNav off and on.
 - **"Port … is busy".** HandNav is already on in another FreeCAD window, or another program uses the port. Set a different `Port`.
 - **The hand is lost near the face or against a busy background.** A gesture survives a loss of up to 0.25 s, and detections that do not look like a hand are dropped. If it still gets lost, lower `--confidence`, add light from the front, and hold the hand beside the face rather than in front of it. Every 10 s `tracker.log` records the frame rate and how often the hand was lost.
+- **"TOO SMALL" over the picture.** The hand is too far from the camera. The numbers are its size and the limit; change the limit with `MinHandSize`. A running gesture continues down to 75 % of it.
 - **Gestures trigger too easily or not at all.** Tune `--pinch` and `--fist` through `TrackerArgs`, and keep the whole hand in the frame with reasonable light.
 
 ## Limitations

@@ -346,6 +346,15 @@ class RobustnessTest(unittest.TestCase):
         stretched[8] = (1.2, 0.1)
         self.assertFalse(ht.plausible(stretched, 0.9))
 
+    def test_small_hand_is_ignored_but_a_running_gesture_may_shrink_a_little(self):
+        h = hand(0.5, 0.5, "pinch")          # palm 0.10
+        self.assertAlmostEqual(ht.palm_size(h), 0.10, 2)
+        self.assertTrue(ht.big_enough(h, 0.09, False))
+        self.assertFalse(ht.big_enough(h, 0.12, False))
+        self.assertTrue(ht.big_enough(h, 0.12, True))
+        self.assertFalse(ht.big_enough(h, 0.15, True))
+        self.assertTrue(ht.big_enough(h, 0, False))
+
     def test_picker_keeps_the_hand_of_a_running_gesture(self):
         k, a, b = ht.HandPicker(), hand(0.3, 0.6, "pinch"), hand(0.9, 0.3, "open")
         self.assertEqual(k.pick([a], 0.0, False), [a])

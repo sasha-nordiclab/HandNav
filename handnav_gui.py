@@ -247,6 +247,7 @@ class Navigator(QtCore.QObject):
             args += ["--camera-name", name]
         if self.dock is not None:
             args.append("--embed")
+        args += ["--min-hand", "%.3f" % min(max(p.GetFloat("MinHandSize", 0.12), 0.0), 1.0)]
         if p.GetBool("TwoHands", False):
             args.append("--two-hands")
         try:
