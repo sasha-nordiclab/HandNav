@@ -5,6 +5,7 @@
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import unittest
@@ -157,9 +158,28 @@ class GesturesTest(unittest.TestCase):
         pk = feed(g, [[hand(0.4 - 0.01 * i, 0.5, "pinch"), hand(0.6, 0.5, "open")] for i in range(10)])
         self.assertEqual(pk, [{"t": "mode", "m": "idle"}])
         # only after both hands opened can a new gesture start
-        feed(g, [[hand(0.3, 0.5, "open"), hand(0.6, 0.5, "open")]] * 2)
+        feed(g, [[hand(0.3, 0.5, "open"), hand(0.6, 0.5, "open")]] * 4)
         pk = feed(g, [[hand(0.3 + 0.01 * i, 0.5, "pinch")] for i in range(6)])
         self.assertEqual(pk[0], {"t": "mode", "m": "orbit"})
+
+    def test_zoom_latch_survives_a_lost_frame(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.4, 0.5, "pinch"), hand(0.6, 0.5, "pinch")]] * 5)
+        held = [hand(0.4, 0.5, "pinch"), hand(0.6, 0.5, "open")]
+        pk = feed(g, [held] * 3 + [[]] + [held] * 5)   # the pinched hand is undetected for one frame
+        self.assertEqual(pk, [{"t": "mode", "m": "idle"}])
+
+    def test_loose_threshold_does_not_leak_to_a_neighbouring_hand(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.4, 0.5, "pinch")]] * 5)
+        feed(g, [[hand(0.4, 0.5, "pinch"), hand(0.58, 0.5, "gap")]] * 5)
+        self.assertEqual(g.mode, "orbit")
+
+    def test_held_pinch_survives_a_lost_frame(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "pinch")]] * 5)
+        feed(g, [[]] + [[hand(0.5, 0.5, "gap")]] * 5)
+        self.assertEqual(g.mode, "orbit")
 
     def test_pan_follows_the_same_hand_when_the_order_swaps(self):
         g = ht.Gestures()
@@ -231,13 +251,58 @@ class LinkTest(unittest.TestCase):
         self.assertIsNotNone(stale)
         # a second tracker cannot bind while the first one lives, and tells it to quit
         t0 = time.monotonic()
-        self.assertIsNone(ht.bind_control(port))
+        self.assertIsNone(ht.bind_control(port, wait=1.2))
         self.assertGreater(time.monotonic() - t0, 1.0)
         self.assertTrue(stale.recv(64).startswith(b"quit"))
         stale.close()
         fresh = ht.bind_control(port)
         self.assertIsNotNone(fresh)
         fresh.close()
+
+
+class TrackerProcessTest(unittest.TestCase):
+    """Runs the real tracker process; it exits before the imports that need mediapipe."""
+
+    def _run(self, *args):
+        r = subprocess.run([sys.executable, ht.__file__, *args], capture_output=True, text=True, timeout=40)
+        return r.returncode, r.stdout + r.stderr
+
+    def _port(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        self.addCleanup(s.close)
+        s.settimeout(1)
+        return s, s.getsockname()[1]
+
+    def test_exits_when_freecad_is_not_listening(self):
+        s, port = self._port()
+        s.close()
+        code, text = self._run("--port", str(port))
+        self.assertEqual(code, 0, text)
+        self.assertIn("not listening", text)
+
+    def test_missing_token_file(self):
+        code, text = self._run("--token-file", "no-such-file")
+        self.assertEqual(code, 1)
+        self.assertIn("session token", text)
+
+    def test_stop_or_failure_while_starting_says_bye(self):
+        s, port = self._port()
+        proc = subprocess.Popen([sys.executable, ht.__file__, "--port", str(port), "--camera", "99"],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(proc.kill)
+        s.recv(65535)                       # first status packet: the tracker is up
+        for _ in range(10):                 # keep asking until the control port is bound
+            s.sendto(b"quit", ("127.0.0.1", port + 1))
+            time.sleep(0.05)
+        text, _ = proc.communicate(timeout=30)
+        msgs = []
+        try:
+            while True:
+                msgs.append(json.loads(s.recv(65535)))
+        except OSError:
+            pass
+        self.assertIn("bye", [m["t"] for m in msgs], text)
 
 
 class PickCameraTest(unittest.TestCase):

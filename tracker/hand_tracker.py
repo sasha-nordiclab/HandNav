@@ -25,6 +25,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,30 +75,37 @@ class Gestures:
         self.mode = "idle"
         self._target, self._count, self._mismatch = None, 0, 0
         self._latch = False   # after a zoom: wait for both hands to open before anything else
-        self._hands = []      # [(gesture, center)] of the previous frame, for per-hand hysteresis
+        self._calm = 0        # frames in a row without any gesture, while latched
+        self._hands = []      # [(gesture, center, frames unseen)], for per-hand hysteresis
         self._raw = None      # last raw control value (point, or (distance, 0) for zoom)
         self._s = None        # smoothed control value
         self._prev = None     # smoothed value at the last emitted packet
 
-    def _held(self, center):
-        """Gesture the nearest hand of the previous frame was making, or None."""
-        best, best_d = None, 0.25
-        for g, c in self._hands:
-            dist = _d(c, center)
-            if dist < best_d:
-                best, best_d = g, dist
-        return best
+    MEMORY = 4        # frames a hand keeps its held gesture while undetected
+    MATCH = 0.25      # how far a hand can move between frames and still be the same hand
+
+    def _match(self, centers):
+        """Pair current hands with remembered ones, nearest pairs first, each used once."""
+        pairs = sorted((_d(c, old[1]), i, j) for i, c in enumerate(centers)
+                       for j, old in enumerate(self._hands))
+        held, used = {}, set()
+        for dist, i, j in pairs:
+            if dist < self.MATCH and i not in held and j not in used:
+                held[i] = self._hands[j][0]
+                used.add(j)
+        return held, used
 
     def classify_hands(self, hands_pts):
         """Classify every hand; only a hand already holding a gesture gets the looser threshold."""
-        out = []
-        for pts in hands_pts:
-            _, center = classify(pts, self.pinch_on, self.fist_on)
-            held = self._held(center)
-            out.append(classify(pts,
-                                self.pinch_off if held == "pinch" else self.pinch_on,
-                                self.fist_off if held == "fist" else self.fist_on))
-        self._hands = out
+        centers = [classify(pts)[1] for pts in hands_pts]
+        held, used = self._match(centers)
+        out = [classify(pts,
+                        self.pinch_off if held.get(i) == "pinch" else self.pinch_on,
+                        self.fist_off if held.get(i) == "fist" else self.fist_on)
+               for i, pts in enumerate(hands_pts)]
+        unseen = [(g, c, n + 1) for j, (g, c, n) in enumerate(self._hands)
+                  if j not in used and n + 1 <= self.MEMORY]
+        self._hands = [(g, c, 0) for g, c in out] + unseen
         return out
 
     def _nearest(self, points):
@@ -111,7 +119,9 @@ class Gestures:
         pinch = [c for g, c in hands if g == "pinch"]
         fist = [c for g, c in hands if g == "fist"]
         if self._latch:
-            if not pinch and not fist:
+            # a hand lost for one frame is not an open hand: ask for several calm frames
+            self._calm = 0 if pinch or fist else self._calm + 1
+            if self._calm > self.debounce:
                 self._latch = False
             want, val = "idle", None
         elif len(pinch) >= 2:
@@ -159,7 +169,7 @@ class Gestures:
         self._target, self._count, self._mismatch = None, 0, 0
         if self.mode == "zoom" and new != "zoom":
             # a zoom ends one hand at a time; do not let the other hand orbit on the way out
-            self._latch, new, val = True, "idle", None
+            self._latch, self._calm, new, val = True, 0, "idle", None
         if new == self.mode:
             return []
         self.mode = new
@@ -206,9 +216,11 @@ class Link:
             self.packet(t="alive")
 
 
-def bind_control(port):
-    """Bind the stop port. A tracker left over from an earlier start is told to quit first."""
-    for attempt in range(4):
+def bind_control(port, wait=15.0, waiting=None):
+    """Bind the stop port. A tracker left over from an earlier start is told to quit first;
+    `waiting()` is called about once a second meanwhile and may return True to give up."""
+    deadline = time.monotonic() + wait
+    while True:
         ctl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             ctl.bind(("127.0.0.1", port))
@@ -216,11 +228,15 @@ def bind_control(port):
             return ctl
         except OSError:
             ctl.close()
-            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if time.monotonic() >= deadline or (waiting and waiting()):
+            return None
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
             probe.sendto(b"quit", ("127.0.0.1", port))
-            probe.close()
-            time.sleep(1.0)
-    return None
+        except OSError:
+            pass
+        probe.close()
+        time.sleep(0.7)
 
 
 def model_ok():
@@ -238,7 +254,8 @@ def ensure_model(say=print):
     say("Downloading the hand landmark model (about 8 MB)…")
     tmp = MODEL_PATH + ".part"
     # curl uses the system certificates; python.org builds often have none
-    subprocess.run(["/usr/bin/curl", "-fsSL", "-o", tmp, MODEL_URL], check=True)
+    subprocess.run(["/usr/bin/curl", "-fsSL", "--connect-timeout", "20", "--max-time", "600",
+                    "-o", tmp, MODEL_URL], check=True)
     os.replace(tmp, MODEL_PATH)
     if not model_ok():
         os.remove(MODEL_PATH)
@@ -246,27 +263,28 @@ def ensure_model(say=print):
 
 
 def list_cameras():
-    """[(name, unique_id)] in OpenCV's index order (AVFoundation devices sorted by unique ID)."""
+    """[(name, unique_id)] in OpenCV's index order (AVFoundation devices sorted by unique ID).
+    None when the list could not be read, [] when there is no camera."""
     import subprocess
     try:
         raw = subprocess.run(["/usr/sbin/system_profiler", "-json", "SPCameraDataType"],
                              capture_output=True, text=True, timeout=20).stdout
         cams = [(c.get("_name", "?"), c.get("spcamera_unique-id", "")) for c in json.loads(raw)["SPCameraDataType"]]
     except Exception:
-        return []
+        return None
     return sorted(cams, key=lambda c: c[1])
 
 
-def pick_camera(index, name, cams=None):
+def pick_camera(index, name, cams):
     """Camera index: explicit name match, explicit index, else the Mac's built-in camera."""
-    cams = list_cameras() if cams is None else cams
+    cams = cams or []
     for i, (n, _) in enumerate(cams):
-        print("  camera %d: %s" % (i, n), flush=True)
+        out("  camera %d: %s" % (i, n))
     if name:
         for i, (n, _) in enumerate(cams):
             if name.lower() in n.lower():
                 return i
-        print("Camera '%s' not found, using the built-in one." % name, flush=True)
+        out("Camera '%s' not found, using the built-in one." % name)
     elif index >= 0:
         return index
     for words in (("facetime", "macbook", "built-in"), ("",)):
@@ -281,7 +299,7 @@ def main():
     ap.add_argument("--camera", type=int, default=-1, help="camera index; -1 = the Mac's built-in camera")
     ap.add_argument("--camera-name", default="", help="part of a camera name, e.g. FUJIFILM")
     ap.add_argument("--port", type=int, default=47800)
-    ap.add_argument("--token", default="", help="session token given by the FreeCAD addon")
+    ap.add_argument("--token-file", default="", help="file with the session token written by the FreeCAD addon")
     ap.add_argument("--embed", action="store_true", help="send the preview to FreeCAD instead of opening a window")
     ap.add_argument("--no-preview", action="store_true", help="no preview window")
     ap.add_argument("--standalone", action="store_true", help="keep running without FreeCAD listening (for testing)")
@@ -290,13 +308,14 @@ def main():
     ap.add_argument("--smooth", type=float, default=0.5, help="smoothing 0.05..1 (smaller = smoother)")
     args = ap.parse_args()
 
-    # The stop port comes first, so a stop sent while the model loads or macOS asks about the
-    # camera is not lost, and a second tracker never reaches the camera.
-    ctl = bind_control(args.port + 1)
-    if ctl is None:
-        sys.exit("Port %d is in use by another program: HandNav cannot start. "
-                 "Set a different Port in the HandNav parameters." % (args.port + 1))
-    link = Link(args.port, args.token, args.standalone)
+    token = ""
+    if args.token_file:   # a file, not an argument: the process list is readable by every user
+        try:
+            with open(os.path.join(HERE, args.token_file)) as f:
+                token = f.read().strip()
+        except OSError as e:
+            sys.exit("cannot read the session token (%s). Switch HandNav on in FreeCAD first." % e)
+    link = Link(args.port, token, args.standalone)
 
     stop = {"why": None}
 
@@ -317,7 +336,7 @@ def main():
         except OSError:
             pass
         link.keepalive()
-        if link.gone:
+        if link.gone and not stop["why"]:
             stop["why"] = "FreeCAD is not listening"
         return stop["why"]
 
@@ -340,6 +359,45 @@ def main():
         finish("FreeCAD is not listening on port %d. Switch HandNav on in FreeCAD first "
                "(or use --standalone to test the tracker alone)." % args.port)
 
+    # The stop port comes before the slow steps and the camera, so a stop sent meanwhile is not
+    # lost and a second tracker never reaches the camera.
+    def still_waiting():
+        link.packet(t="status", msg="Waiting for the previous tracker to stop…")
+        return bool(link.gone or stop["why"])
+
+    ctl = bind_control(args.port + 1, waiting=still_waiting)
+    if ctl is None:
+        if link.gone or stop["why"]:
+            finish(stop["why"] or "FreeCAD is not listening")
+        finish("UDP port %d is still in use, by an earlier tracker or another program. Try again, "
+               "or set a different Port in the HandNav parameters" % (args.port + 1), ok=False)
+
+    # Imports, download and camera opening block for seconds: this thread keeps the panel informed
+    # and obeys a stop meanwhile. Nothing needs cleaning up yet; the system releases the camera.
+    starting = threading.Event()
+    starting.set()
+
+    def startup_watch():
+        while starting.is_set():
+            if should_stop() and starting.is_set():
+                link.packet(t="bye", msg=stop["why"], ok=True)
+                out("HandNav tracker stopped: " + stop["why"])
+                os._exit(0)
+            time.sleep(0.25)
+
+    threading.Thread(target=startup_watch, daemon=True).start()
+    try:
+        run(args, link, stop, should_stop, say, finish, starting)
+    except SystemExit:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        finish("unexpected error: %s: %s" % (type(e).__name__, e), ok=False)
+
+
+def run(args, link, stop, should_stop, say, finish, starting):
+    """Load everything, open the camera and track until told to stop."""
     say("Loading the hand tracker…")
     import cv2
     import mediapipe as mp
@@ -358,6 +416,8 @@ def main():
         finish(stop["why"])
 
     cams = list_cameras()
+    if cams == []:
+        finish("no camera found. Connect a camera and switch HandNav off and on", ok=False)
     cam_index = pick_camera(args.camera, args.camera_name, cams)
     if cams and cam_index >= len(cams):
         finish("there is no camera %d (found %d: %s). Set Camera or CameraName in the HandNav parameters."
@@ -368,6 +428,8 @@ def main():
     # The first open only triggers the macOS permission prompt and fails, so keep retrying.
     cap, ok, deadline, told = None, False, time.monotonic() + 90, False
     while not ok:
+        if should_stop():
+            finish(stop["why"])
         cap = cv2.VideoCapture(cam_index, cv2.CAP_AVFOUNDATION)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -376,17 +438,18 @@ def main():
             break
         cap.release()
         if time.monotonic() > deadline:
-            finish("could not open %s. Allow Terminal to use the camera in System Settings → "
-                   "Privacy & Security → Camera, or pick another camera." % cam_name, ok=False)
+            finish("could not open %s. Allow HandNav Tracker (or Terminal, if you run it there) in "
+                   "System Settings → Privacy & Security → Camera, or pick another camera." % cam_name, ok=False)
         if not told:
             told = True
-            say("Waiting for camera access: click Allow in the macOS prompt "
-                "(or System Settings → Privacy & Security → Camera → Terminal)…")
+            say("Waiting for camera access: click Allow in the macOS prompt, or enable HandNav Tracker "
+                "in System Settings → Privacy & Security → Camera…")
         for _ in range(6):
             if should_stop():
                 finish(stop["why"])
             time.sleep(0.25)
 
+    starting.clear()   # from here on the capture loop itself checks for a stop
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80)}
     labels = {"idle": "-", "orbit": "ORBIT", "pan": "PAN", "zoom": "ZOOM"}

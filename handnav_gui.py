@@ -1,4 +1,5 @@
 """HandNav FreeCAD side: receives motion packets over UDP and moves the active 3D view camera."""
+import hashlib
 import json
 import math
 import os
@@ -16,12 +17,15 @@ from pivy import coin
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACKER_DIR = os.path.join(HERE, "tracker")
 VENV_OK = os.path.join(TRACKER_DIR, ".venv", ".handnav-ok")   # written by run_tracker.command
+HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")  # built by install.sh
+TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker
 PARAMS = "User parameter:BaseApp/Preferences/Mod/HandNav"
 COMMAND = "HandNav_Toggle"
 NAV_NAME = "HandNavNavigator"
 # FreeCAD.app points these into its own bundle; a child Python (and a Terminal started by
 # `open`, which inherits them) breaks if they leak out.
-SCRUB_ENV = ("PYTHONHOME", "PYTHONPATH", "PREFIX", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
+SCRUB_ENV = ("PYTHONHOME", "PYTHONPATH", "PREFIX", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "GIT_SSL_CAINFO",
+             "FONTCONFIG_FILE", "FONTCONFIG_PATH")
 
 
 def _p():
@@ -43,6 +47,46 @@ def _set_button(checked):
         action.blockSignals(False)
 
 
+def _needs_setup():
+    """Same test as run_tracker.command: will the launcher (re)build the Python environment?"""
+    try:
+        with open(os.path.join(TRACKER_DIR, "requirements.txt"), "rb") as f:
+            want = hashlib.sha256(f.read()).hexdigest()
+        with open(VENV_OK) as f:
+            have = f.read().strip()
+    except OSError:
+        return True
+    return have != want or not os.access(os.path.join(TRACKER_DIR, ".venv", "bin", "python"), os.X_OK)
+
+
+def _use_terminal():
+    """Only when asked for, or when the helper app could not be built."""
+    return (_p().GetBool("UseTerminal", False)
+            or not os.access(os.path.join(HELPER_APP, "Contents", "MacOS", "HandNavTracker"), os.X_OK))
+
+
+def _write_private(name, text):
+    path = os.path.join(TRACKER_DIR, name)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o600)
+
+
+def _log_tail(since, lines=2, width=160):
+    """Last lines the windowless tracker wrote since `since` (epoch seconds), or ""."""
+    try:
+        if os.path.getmtime(TRACKER_LOG) < since:
+            return ""
+        with open(TRACKER_LOG, "rb") as f:
+            f.seek(max(0, os.path.getsize(TRACKER_LOG) - 4000))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    rows = [r.strip() for r in text.replace("\r", "\n").split("\n") if r.strip()]
+    return "\n".join(r[:width] for r in rows[-lines:])
+
+
 def _num(m, key, lo, hi):
     v = float(m[key])
     if not math.isfinite(v):
@@ -58,8 +102,11 @@ class _PreviewLabel(QtWidgets.QLabel):
 class PreviewDock(QtWidgets.QDockWidget):
     """Camera preview and tracker status, shown inside the FreeCAD window."""
 
-    def __init__(self, parent, first_run):
+    def __init__(self, parent, first_run, terminal, manual):
         super().__init__("HandNav", parent)
+        self._where = "its Terminal window" if terminal else "tracker.log in the addon's tracker folder"
+        self._tail = not terminal and not manual   # without a window, show what the tracker writes while it starts
+        self._wall = time.time()
         self.setObjectName("HandNavDock")
         self.label = _PreviewLabel()
         self.label.setAlignment(QtCore.Qt.AlignCenter)
@@ -68,10 +115,13 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setWidget(self.label)
         self._started = time.monotonic()
-        self._patience = 300.0 if first_run else 20.0
+        # how long the start may stay silent before the panel says so; never when the user starts it
+        self._patience = math.inf if manual else 300.0 if first_run else 20.0
+        self._streaming = False   # preview frames have arrived
         self._last = 0.0      # time of the last packet from the tracker
         self._final = False   # the tracker said goodbye: keep its message on screen
-        self.set_text("First run: the tracker is being installed in the Terminal window.\n"
+        self.set_text("Waiting for the tracker.\nRun tracker/run_tracker.command to start it." if manual else
+                      "First run: installing the hand tracker (about 300 MB).\n"
                       "This can take a few minutes." if first_run else "Starting the tracker…")
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._check)
@@ -87,7 +137,7 @@ class PreviewDock(QtWidgets.QDockWidget):
     def show_jpeg(self, data):
         pix = QtGui.QPixmap()
         if pix.loadFromData(data, "JPG"):
-            self._final = False
+            self._final, self._streaming = False, True
             self.label.setPixmap(pix.scaled(self.label.size(), QtCore.Qt.KeepAspectRatio,
                                             QtCore.Qt.SmoothTransformation))
 
@@ -98,10 +148,15 @@ class PreviewDock(QtWidgets.QDockWidget):
         if self._final:
             return
         now = time.monotonic()
-        if self._last and now - self._last > 2.5:
+        # loading and opening the camera can be silent for a while; a running stream cannot
+        if self._last and now - self._last > (2.5 if self._streaming else 60.0):
             self.set_text("No signal from the tracker.\nSwitch HandNav off and on to restart it.")
-        elif not self._last and now - self._started > self._patience:
-            self.set_text("The tracker has not started.\nLook at its Terminal window for the reason.")
+        elif not self._last:
+            tail = _log_tail(self._wall) if self._tail else ""
+            if tail:
+                self.set_text(tail)
+            elif now - self._started > self._patience:
+                self.set_text("The tracker has not started.\nSee %s for the reason." % self._where)
 
 
 class Navigator(QtCore.QObject):
@@ -126,6 +181,11 @@ class Navigator(QtCore.QObject):
             return True
         p = _p()
         self.port = p.GetInt("Port", 47800)
+        if not 1024 <= self.port <= 65534:
+            msg = "Port must be between 1024 and 65534, not %d" % self.port
+            App.Console.PrintError("HandNav: %s\n" % msg)
+            _status(msg)
+            return False
         sock = QtNetwork.QUdpSocket(self)
         if not sock.bind(QtNetwork.QHostAddress(QtNetwork.QHostAddress.LocalHost), self.port):
             msg = "port %d is busy (%s). Is HandNav on in another FreeCAD window?" % (self.port, sock.errorString())
@@ -138,18 +198,16 @@ class Navigator(QtCore.QObject):
         self.token = secrets.token_hex(8)
         self._depth = None
         auto = launch_tracker and p.GetBool("AutoStartTracker", True)
-        first_run = auto and not os.path.exists(VENV_OK)
+        first_run = auto and _needs_setup()
         if p.GetBool("EmbedPreview", True):
             mw = Gui.getMainWindow()
-            self.dock = PreviewDock(mw, first_run)
+            self.dock = PreviewDock(mw, first_run, _use_terminal(), not auto)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
             mw.resizeDocks([self.dock], [270], QtCore.Qt.Vertical)
         try:
             self._write_args()
             if auto:
-                self._launch(background=self.dock is not None and not first_run)
-            elif self.dock is not None:
-                self.dock.set_text("Waiting for the tracker.\nRun tracker/run_tracker.command to start it.")
+                self._launch(_use_terminal(), first_run)
         except OSError as e:
             App.Console.PrintError("HandNav: could not start the tracker (%s)\n" % e)
             self.stop()
@@ -178,7 +236,7 @@ class Navigator(QtCore.QObject):
     def _write_args(self):
         """Tracker arguments, one per line: the launcher reads them without any shell evaluation."""
         p = _p()
-        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token", self.token]
+        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token-file", "session"]
         name = p.GetString("CameraName", "").strip()
         if name:
             args += ["--camera-name", name]
@@ -188,17 +246,23 @@ class Navigator(QtCore.QObject):
             args += shlex.split(p.GetString("TrackerArgs", ""))
         except ValueError as e:
             App.Console.PrintWarning("HandNav: ignoring TrackerArgs (%s)\n" % e)
-        path = os.path.join(TRACKER_DIR, "args")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("".join(a.replace("\n", " ") + "\n" for a in args))
-        os.chmod(path, 0o600)
+        _write_private("session", self.token + "\n")
+        _write_private("args", "".join(a.replace("\n", " ") + "\n" for a in args))
 
-    def _launch(self, background):
-        """Run the tracker in Terminal: FreeCAD.app itself has no camera permission entry."""
+    def _launch(self, terminal, first_run):
+        """Start the tracker outside FreeCAD's process tree: FreeCAD.app has no camera permission
+        entry, so macOS would refuse the camera to anything FreeCAD runs directly.
+
+        Default: the windowless HandNav Tracker helper app, which holds the camera permission
+        itself. UseTerminal=true runs the launcher in a Terminal window instead."""
         env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
-        cmd = ["open"] + (["-g"] if background else []) + ["-a", "Terminal",
-                                                           os.path.join(TRACKER_DIR, "run_tracker.command")]
+        if terminal:
+            # the first run installs for minutes: keep that window in front
+            cmd = ["open"] + ([] if first_run or self.dock is None else ["-g"]) + [
+                "-a", "Terminal", os.path.join(TRACKER_DIR, "run_tracker.command")]
+        else:
+            # -n: a new instance even if the previous one is still shutting down; -g: stay in the background
+            cmd = ["open", "-n", "-g", HELPER_APP]
         subprocess.Popen(cmd, env=env)
 
     # --- packets ---------------------------------------------------------
@@ -362,12 +426,14 @@ def navigator():
         old = Gui.getMainWindow().findChild(QtCore.QObject, NAV_NAME)
         if old is not None:  # left by an earlier copy of this module: shut it down
             try:
+                was_on = old.running()
                 old.stop()
             except Exception:
-                pass
+                was_on = True
             old.setObjectName("")
             old.deleteLater()
-            _set_button(False)
+            if was_on:
+                _set_button(False)
         _nav = Navigator()
     return _nav
 

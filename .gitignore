@@ -4,5 +4,10 @@ __pycache__/
 .DS_Store
 # written at runtime
 tracker/args
+tracker/HandNavTracker*/
+tracker/.helper-ok
+tracker/session
+tracker/.setup.lock
+tracker/tracker.log
 tracker/hand_landmarker.task
 tracker/*.part

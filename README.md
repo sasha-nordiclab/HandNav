@@ -31,6 +31,8 @@ Gestures work like grabbing the model: the view follows your hand while the gest
 
 This copies the addon into the `Mod` folder of the newest FreeCAD version that has a settings folder under `~/Library/Application Support/FreeCAD`. Pass a `Mod` folder as an argument to install somewhere else. Restart FreeCAD afterwards.
 
+The installer also compiles a tiny windowless helper app, HandNav Tracker (`tracker/helper.c`), which needs Apple's Command Line Tools (`xcode-select --install`). Without them HandNav falls back to running the tracker in a Terminal window.
+
 The first time you switch HandNav on, the tracker sets itself up inside the installed addon folder:
 
 - a Python environment with `mediapipe` and its dependencies (OpenCV, NumPy and others, about 300 MB). With [uv](https://docs.astral.sh/uv/) installed this is a Python 3.12 environment, which uv downloads if you do not have one; without uv it uses the `python3` on your `PATH`.
@@ -39,13 +41,13 @@ The first time you switch HandNav on, the tracker sets itself up inside the inst
 ## Use
 
 1. Press the HandNav button (a hand) on the View toolbar, or View → HandNav.
-2. Terminal opens and runs the tracker. On the very first run it stays in front while it installs; later it opens in the background. The first time, macOS asks to let Terminal use the camera: allow it.
-3. A HandNav panel appears in the FreeCAD window. It shows what the tracker is doing, then the camera picture with the tracked hand points and the current mode (`ORBIT`, `PAN`, `ZOOM`). If the tracker fails, the reason is shown there.
+2. A HandNav panel appears in the FreeCAD window. It shows what the tracker is doing (on the first run, the installation progress), then the camera picture with the tracked hand points and the current mode (`ORBIT`, `PAN`, `ZOOM`). If the tracker fails, the reason is shown there. No other window opens.
+3. The first time, macOS asks once whether HandNav Tracker may use the camera: allow it.
 4. Press the button again to stop.
 
-The camera is released whenever HandNav stops listening: when you press the button again, when FreeCAD quits, and also when FreeCAD crashes. You can also stop the tracker with Ctrl+C in its Terminal window or by closing that window.
+The camera is released whenever HandNav stops listening: when you press the button again, when FreeCAD quits, and also when FreeCAD crashes.
 
-The tracker runs in Terminal rather than inside FreeCAD because FreeCAD.app has no camera permission entry, so macOS would refuse it the camera. Each start opens a new Terminal window; to have finished ones close by themselves, set Terminal → Settings → Profiles → Shell → "When the shell exits" to "Close if the shell exited cleanly".
+The tracker runs under the helper app rather than inside FreeCAD because FreeCAD.app has no camera permission entry, so macOS would refuse it the camera. macOS asks again only when the helper app itself is rebuilt, which `install.sh` does only when its source changed.
 
 ## Settings
 
@@ -61,11 +63,12 @@ Tools → Edit parameters → `BaseApp/Preferences/Mod/HandNav`. Create the entr
 | `PanGain` | Float | `1.5` | Pan sensitivity, view heights per frame height of hand travel. |
 | `ZoomGain` | Float | `1.5` | Zoom sensitivity (exponent). |
 | `InvertX`, `InvertY` | Boolean | `false` | Reverse the orbit direction. |
+| `UseTerminal` | Boolean | `false` | Run the tracker in a Terminal window instead of the helper app. Terminal then needs the camera permission. |
 | `AutoStartTracker` | Boolean | `true` | Start the tracker with the button. With `false`, switch HandNav on first and then run `tracker/run_tracker.command` from the installed addon folder yourself. |
 | `TrackerArgs` | String | empty | Extra tracker options, e.g. `--pinch 0.25 --smooth 0.4`. |
 | `Port` | Integer | `47800` | UDP port on 127.0.0.1. The tracker also listens on the next port for the stop signal. |
 
-The tracker lists the cameras it sees, with their indexes, in its Terminal window.
+The tracker lists the cameras it sees, with their indexes, in `tracker/tracker.log` in the installed addon folder.
 
 Tracker options (`tracker/hand_tracker.py --help`):
 
@@ -78,7 +81,7 @@ The gesture thresholds are first estimates: tune `--pinch` and `--fist` if a ges
 ## How it works
 
 ```
-camera → tracker/hand_tracker.py (MediaPipe, own Python env, runs in Terminal)
+camera → tracker/hand_tracker.py (MediaPipe, own Python env, started by HandNavTracker.app)
             │  UDP 127.0.0.1:47800: JSON motion and status packets + JPEG preview frames
             ▼
          handnav_gui.py (inside FreeCAD) → Coin camera of the active 3D view
@@ -88,21 +91,23 @@ camera → tracker/hand_tracker.py (MediaPipe, own Python env, runs in Terminal)
 - `handnav_gui.py` listens on a `QUdpSocket`, accumulates the packets that arrived since the last event-loop pass and applies them to the view camera. It never touches the document.
 - `InitGui.py` registers the toggle command and adds it to the View toolbar and the View menu.
 - The tracker sends over a connected UDP socket, so it notices as soon as FreeCAD stops listening and exits. A tracker left over from an earlier start is told to quit by the next one.
+- `HandNavTracker.app` (built from `tracker/helper.c` and `tracker/Info.plist`) has no window or Dock icon. It starts `run_tracker.command` as its child so that macOS attributes the camera to it, and writes the output to `tracker/tracker.log`.
 
-**Privacy and trust.** Nothing leaves the machine: both sockets are on the loopback interface and the camera picture goes only to the FreeCAD panel. Each session uses a random token, kept in a file only you can read, and FreeCAD ignores packets without it. This protects against stray packets and other users of the Mac; it is not a defence against other programs running under your own account.
+**Privacy and trust.** Nothing leaves the machine: both sockets are on the loopback interface and the camera picture goes only to the FreeCAD panel. Each session uses a random token, kept in a file only you can read, and FreeCAD ignores packets without it. This protects the view against stray packets and other users of the Mac; it is not a defence against other programs running under your own account. The stop signal needs no token, so any local program can switch the tracker off.
 
 ## Troubleshooting
 
 - **The panel shows a message instead of a picture.** It is the tracker's own status or error, for example waiting for camera access, or a camera index that does not exist.
-- **"The tracker has not started".** Look at the Terminal window: the environment setup may have failed. Fix the cause and switch HandNav off and on; an incomplete environment is rebuilt automatically.
-- **macOS never asked about the camera.** Enable Terminal under System Settings → Privacy & Security → Camera.
+- **"The tracker has not started".** Look at `tracker/tracker.log` in the installed addon folder: the environment setup may have failed. Fix the cause and switch HandNav off and on; an incomplete environment is rebuilt automatically.
+- **macOS never asked about the camera.** Enable HandNav Tracker under System Settings → Privacy & Security → Camera.
+- **A Terminal window opens.** The helper app was not built. Install the Command Line Tools and run `./install.sh` again, and check that `UseTerminal` is not set.
 - **Wrong camera.** Set `Camera` or `CameraName` (see Settings) and switch HandNav off and on.
 - **"Port … is busy".** HandNav is already on in another FreeCAD window, or another program uses the port. Set a different `Port`.
 - **Gestures trigger too easily or not at all.** Tune `--pinch` and `--fist` through `TrackerArgs`, and keep the whole hand in the frame with reasonable light.
 
 ## Limitations
 
-- macOS only: the launcher uses Terminal, AVFoundation and `system_profiler`.
+- macOS only: it uses a macOS helper app, AVFoundation and `system_profiler`.
 - One ordinary camera gives no real depth, so there are three motions (orbit, pan, zoom), not the six axes of a 3D mouse.
 - No roll around the view axis, no standard views and no object selection yet.
 - Gesture thresholds have been tuned on synthetic hand poses, not on a wide range of real hands.
