@@ -127,19 +127,27 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.guide_area.setWidget(self.guide)
         self.guide_area.setWidgetResizable(True)
         self.guide_area.setMinimumHeight(120)
-        self.guide_area.setVisible(_p().GetBool("ShowGuide", False))
-        guide_button = QtWidgets.QToolButton()
-        guide_button.setText("Gestures")
-        guide_button.setToolTip("Show or hide the list of gestures")
-        guide_button.setCheckable(True)
-        guide_button.setChecked(_p().GetBool("ShowGuide", False))
-        guide_button.toggled.connect(self._toggle_guide)
+        self.sliders = handnav_prefs.SensitivityPanel(lambda: settings_changed(restart=False, reload=False))
+        self.sliders_area = QtWidgets.QScrollArea()
+        self.sliders_area.setWidget(self.sliders)
+        self.sliders_area.setWidgetResizable(True)
+        self.sliders_area.setMinimumHeight(120)
+        self._sections = {}
+        buttons = QtWidgets.QHBoxLayout()
+        for name, text, tip, area in (
+                ("guide", "Gestures", "Show or hide the list of gestures", self.guide_area),
+                ("sliders", "Sensitivity", "Show or hide the sensitivity sliders", self.sliders_area)):
+            button = QtWidgets.QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setCheckable(True)
+            button.clicked.connect(lambda on, n=name: self.show_section(n if on else ""))
+            buttons.addWidget(button)
+            self._sections[name] = (button, area)
         settings_button = QtWidgets.QToolButton()
         settings_button.setText("Settings…")
         settings_button.setToolTip("Open the HandNav settings")
         settings_button.clicked.connect(lambda: Gui.showPreferences("HandNav", 0))
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.addWidget(guide_button)
         buttons.addWidget(settings_button)
         buttons.addStretch()
         body = QtWidgets.QWidget()
@@ -148,6 +156,9 @@ class PreviewDock(QtWidgets.QDockWidget):
         layout.addWidget(self.label, 3)
         layout.addLayout(buttons)
         layout.addWidget(self.guide_area, 2)
+        layout.addWidget(self.sliders_area, 2)
+        for button, area in self._sections.values():
+            area.hide()
         self.setWidget(body)
         self._started = time.monotonic()
         # how long the start may stay silent before the panel says so; never when the user starts it
@@ -162,11 +173,18 @@ class PreviewDock(QtWidgets.QDockWidget):
         self._timer.timeout.connect(self._check)
         self._timer.start(1000)
 
-    def _toggle_guide(self, on):
-        self.guide_area.setVisible(on)
-        _p().SetBool("ShowGuide", on)
+    def show_section(self, name):
+        """Show one section ("guide", "sliders") under the picture, or none ("")."""
+        for n, (button, area) in self._sections.items():
+            button.setChecked(n == name)
+            area.setVisible(n == name)
+        _p().SetString("PanelSection", name)
+        self.fit_height()
+
+    def fit_height(self):
         if not self.isFloating():
-            Gui.getMainWindow().resizeDocks([self], [520 if on else 270], QtCore.Qt.Vertical)
+            Gui.getMainWindow().resizeDocks([self], [560 if _p().GetString("PanelSection", "") else 270],
+                                            QtCore.Qt.Vertical)
 
     def alive(self):
         self._last = time.monotonic()
@@ -244,7 +262,7 @@ class Navigator(QtCore.QObject):
             mw = Gui.getMainWindow()
             self.dock = PreviewDock(mw, first_run, _use_terminal(), not auto)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
-            mw.resizeDocks([self.dock], [520 if p.GetBool("ShowGuide", False) else 270], QtCore.Qt.Vertical)
+            self.dock.show_section(p.GetString("PanelSection", ""))
         try:
             self._write_args()
             if auto:
@@ -293,10 +311,22 @@ class Navigator(QtCore.QObject):
         self._write_args()
         self._launch(_use_terminal(), _needs_setup())
 
+    def tune_tracker(self):
+        """Hand the current thresholds to the running tracker."""
+        values = json.dumps(handnav_prefs.live_values())
+        self._to_tracker(("set %s %s" % (self.token, values)).encode())
+        try:
+            self._write_args()   # for a tracker that is still starting, or started again by hand
+        except OSError:
+            pass
+
     def _quit_tracker(self):
+        self._to_tracker(b"quit")
+
+    def _to_tracker(self, data):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(b"quit", ("127.0.0.1", self.port + 1))
+            s.sendto(data, ("127.0.0.1", self.port + 1))
             s.close()
         except OSError:
             pass
@@ -447,9 +477,10 @@ class Navigator(QtCore.QObject):
         look = rot.multVec(coin.SbVec3f(0, 0, -1))
         ortho = view.getCameraType() == "Orthographic"
         turntable = p.GetBool("Turntable", False)
+        overall = min(max(p.GetFloat("Sensitivity", 1.0), 0.05), 10.0)
 
         if orbit[0] or orbit[1]:
-            g = p.GetFloat("OrbitGain", 4.0)
+            g = p.GetFloat("OrbitGain", 4.0) * overall
             yaw = -orbit[0] * g * (-1.0 if p.GetBool("InvertX", False) else 1.0)
             pitch = orbit[1] * g * (-1.0 if p.GetBool("InvertY", False) else 1.0)
             depth = self._pivot_depth(view, pos, look, fd, ortho)
@@ -473,13 +504,13 @@ class Navigator(QtCore.QObject):
         if roll and not turntable:
             # the model turns with the hand, so the camera turns the other way about its own view
             # axis; the pivot lies on that axis and the position stays
-            a = -roll * p.GetFloat("RollGain", 1.0) * (-1.0 if p.GetBool("InvertRoll", False) else 1.0)
+            a = -roll * p.GetFloat("RollGain", 1.0) * overall * (-1.0 if p.GetBool("InvertRoll", False) else 1.0)
             rot = coin.SbRotation(coin.SbVec3f(0, 0, 1), a) * rot
             cam.orientation.setValue(rot)
 
         if pan[0] or pan[1]:
             h = cam.height.getValue() if ortho else 2.0 * fd * math.tan(cam.heightAngle.getValue() / 2.0)
-            g = p.GetFloat("PanGain", 1.5) * h
+            g = p.GetFloat("PanGain", 1.5) * overall * h
             right = rot.multVec(coin.SbVec3f(1, 0, 0))
             up = rot.multVec(coin.SbVec3f(0, 1, 0))
             pos = pos - right * (pan[0] * g) - up * (pan[1] * g)
@@ -487,8 +518,8 @@ class Navigator(QtCore.QObject):
 
         if zoom != 1.0 or push:
             # pushing the fist towards the screen moves the model away, pulling brings it closer
-            away = push * p.GetFloat("PushGain", 2.0) * (-1.0 if p.GetBool("InvertPush", False) else 1.0)
-            k = min(max(zoom ** p.GetFloat("ZoomGain", 1.5) * math.exp(away), 0.5), 2.0)
+            away = push * p.GetFloat("PushGain", 2.0) * overall * (-1.0 if p.GetBool("InvertPush", False) else 1.0)
+            k = min(max(zoom ** (p.GetFloat("ZoomGain", 1.5) * overall) * math.exp(away), 0.5), 2.0)
             if ortho:
                 cam.height.setValue(cam.height.getValue() * k)
             else:
@@ -551,10 +582,16 @@ class _Manipulator:
         return [{"insert": COMMAND, "menuItem": "Std_ViewDockUndockFullscreen", "after": ""}]
 
 
-def settings_changed():
-    """Called by the preference page when a setting of the tracker changed."""
-    if _nav is not None and _nav.running():
+def settings_changed(restart=False, reload=True):
+    """Called when settings changed: pass thresholds to the running tracker, or restart it."""
+    if _nav is None or not _nav.running():
+        return
+    if restart:
         _nav.restart_tracker()
+    else:
+        _nav.tune_tracker()
+    if reload and _nav.dock is not None:
+        _nav.dock.sliders.load()
 
 
 def setup():

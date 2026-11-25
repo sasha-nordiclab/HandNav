@@ -1,5 +1,6 @@
 """HandNav settings: one table of parameters, the preference pages built from it, the gesture guide."""
 import json
+import math
 
 import FreeCAD as App
 from PySide import QtCore, QtWidgets
@@ -23,6 +24,7 @@ SPEC = [
          "Orbit around the model's vertical axis. Roll is ignored then."),
     ]),
     ("Speed and direction", [
+        ("Sensitivity", "float", 1.0, "Overall sensitivity", "Multiplies all the speeds below.", 0.2, 4.0, 0.1),
         ("OrbitGain", "float", 4.0, "Orbit speed", "How far the view turns for a hand movement.", 0.5, 15.0, 0.5),
         ("RollGain", "float", 1.0, "Roll speed", "1 turns the view exactly as much as the hand.", 0.2, 5.0, 0.1),
         ("PanGain", "float", 1.5, "Pan speed", "How far the view moves for a hand movement.", 0.2, 6.0, 0.1),
@@ -41,6 +43,10 @@ SPEC = [
          "How close thumb and finger must come. Smaller is stricter, larger triggers more easily.", 0.10, 0.60, 0.02),
         ("Fist", "float", 0.90, "Fist tightness",
          "Smaller needs a tighter fist, larger triggers more easily.", 0.60, 1.20, 0.02),
+        ("TwistStart", "float", 9.0, "Twist before roll starts (°)",
+         "Smaller starts to roll more easily, larger keeps orbiting cleaner.", 2.0, 30.0, 1.0),
+        ("PushStart", "float", 10.0, "Size change before fist zoom starts (%)",
+         "Smaller starts to zoom more easily, larger keeps panning cleaner.", 3.0, 40.0, 1.0),
         ("ViewHold", "float", 0.3, "Hold time for views (s)",
          "How long raised fingers must be held still.", 0.1, 2.0, 0.05),
         ("Smooth", "float", 0.5, "Responsiveness",
@@ -57,10 +63,23 @@ SPEC = [
          "For troubleshooting. Applies the next time HandNav is switched on."),
     ]),
 ]
-# parameters that are handed to the tracker process (the others act in FreeCAD at once)
-TRACKER_PARAMS = ("EnableRoll", "EnablePush", "EnableSqueeze", "TwoHands", "MinHandSize", "Pinch", "Fist",
-                  "ViewHold", "Smooth", "Confidence", "CameraName")
+# thresholds that a running tracker takes over at once: parameter -> name in the tracker
+LIVE = {"MinHandSize": "min_hand", "Pinch": "pinch", "Fist": "fist", "TwistStart": "twist_start",
+        "PushStart": "push_start", "ViewHold": "view_hold", "Smooth": "smooth"}
+# sliders of the panel: (title, [(parameter, label, logarithmic, right end is the smaller value)])
+SLIDERS = [
+    ("Speed", [("Sensitivity", "Overall", True, False), ("OrbitGain", "Orbit", True, False),
+               ("RollGain", "Roll", True, False), ("PanGain", "Pan", True, False),
+               ("ZoomGain", "Zoom", True, False), ("PushGain", "Fist zoom", True, False)]),
+    ("How easily it starts", [("Pinch", "Pinch", False, False), ("Fist", "Fist", False, False),
+                              ("TwistStart", "Roll", True, True), ("PushStart", "Fist zoom", True, True),
+                              ("ViewHold", "Finger views", True, True),
+                              ("MinHandSize", "Distant hand", False, True),
+                              ("Smooth", "Response", False, False)]),
+]
 DEFAULTS = {item[0]: (item[1], item[2]) for _, items in SPEC for item in items}
+RANGES = {item[0]: item[5:7] for _, items in SPEC for item in items if item[1] == "float"}
+TIPS = {item[0]: item[4] for _, items in SPEC for item in items}
 
 GUIDE = """
 <table cellpadding="3">
@@ -115,12 +134,19 @@ def put(name, value):
         p.SetString(name, str(value))
 
 
-def tracker_args():
-    """The tracker's command-line arguments that follow from the settings."""
-    args = ["--min-hand", "%.3f" % min(max(get("MinHandSize"), 0.0), 1.0),
-            "--pinch", "%.3f" % get("Pinch"), "--fist", "%.3f" % get("Fist"),
-            "--view-hold", "%.3f" % get("ViewHold"), "--smooth", "%.3f" % get("Smooth"),
-            "--confidence", "%.3f" % min(max(get("Confidence"), 0.05), 0.95)]
+def live_values():
+    """The thresholds for a running tracker."""
+    return {key: round(get(name), 4) for name, key in LIVE.items()}
+
+
+def tracker_args(live=True):
+    """The tracker's command-line arguments that follow from the settings; without `live` only
+    those that need a restart."""
+    args = []
+    if live:
+        for key, value in live_values().items():
+            args += ["--" + key.replace("_", "-"), "%.3f" % max(value, 0.0)]
+    args += ["--confidence", "%.3f" % min(max(get("Confidence"), 0.05), 0.95)]
     if get("CameraName").strip():
         args += ["--camera-name", get("CameraName").strip()]
     for name, option, when in (("EnableRoll", "--no-roll", False), ("EnablePush", "--no-push", False),
@@ -232,12 +258,85 @@ class SettingsPage:
         self._list_cameras()
 
     def saveSettings(self):
-        before = tracker_args()
+        before = tracker_args(live=False)
         for name in DEFAULTS:
             put(name, self._value(name))
-        if tracker_args() != before:
-            import handnav_gui
-            handnav_gui.settings_changed()
+        import handnav_gui
+        handnav_gui.settings_changed(restart=tracker_args(live=False) != before)
+
+
+class SensitivityPanel(QtWidgets.QWidget):
+    """Sliders that act while you move your hand. To the right is always more sensitive."""
+
+    STEPS = 100
+
+    def __init__(self, changed, parent=None):
+        super().__init__(parent)
+        self._changed = changed
+        self._rows = {}
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(4, 4, 4, 4)
+        row = 0
+        for title, items in SLIDERS:
+            grid.addWidget(QtWidgets.QLabel("<b>%s</b>" % title), row, 0, 1, 3)
+            row += 1
+            for name, label, log, flip in items:
+                slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+                slider.setRange(0, self.STEPS)
+                slider.setMinimumWidth(60)
+                value = QtWidgets.QLabel()
+                value.setMinimumWidth(36)
+                for w in (slider, value):
+                    w.setToolTip(TIPS[name] + "\nDefault: %g. Right: more sensitive." % DEFAULTS[name][1])
+                slider.valueChanged.connect(lambda _pos, n=name: self._moved(n))
+                grid.addWidget(QtWidgets.QLabel(label), row, 0)
+                grid.addWidget(slider, row, 1)
+                grid.addWidget(value, row, 2)
+                self._rows[name] = (slider, value, log, flip)
+                row += 1
+        reset = QtWidgets.QPushButton("Reset sensitivity")
+        reset.clicked.connect(self.reset)
+        grid.addWidget(reset, row, 0, 1, 3)
+        grid.setRowStretch(row + 1, 1)
+        grid.setColumnStretch(1, 1)
+        self.load()
+
+    def to_value(self, name, pos):
+        _, _, log, flip = self._rows[name]
+        lo, hi = RANGES[name]
+        t = pos / self.STEPS
+        t = 1 - t if flip else t
+        return round(lo * (hi / lo) ** t if log else lo + (hi - lo) * t, 3)
+
+    def to_pos(self, name, value):
+        _, _, log, flip = self._rows[name]
+        lo, hi = RANGES[name]
+        value = min(max(value, lo), hi)
+        t = math.log(value / lo) / math.log(hi / lo) if log else (value - lo) / (hi - lo)
+        return round((1 - t if flip else t) * self.STEPS)
+
+    def load(self):
+        """Show the stored values without writing anything."""
+        for name, (slider, label, _, _) in self._rows.items():
+            slider.blockSignals(True)
+            slider.setValue(self.to_pos(name, get(name)))
+            slider.blockSignals(False)
+            label.setText("%.2f" % get(name))
+
+    def _moved(self, name):
+        slider, label, _, _ = self._rows[name]
+        value = self.to_value(name, slider.value())
+        if slider.value() == self.to_pos(name, DEFAULTS[name][1]):
+            value = DEFAULTS[name][1]   # the default sits exactly on its notch
+        put(name, value)
+        label.setText("%.2f" % value)
+        self._changed()
+
+    def reset(self):
+        for name in self._rows:
+            put(name, DEFAULTS[name][1])
+        self.load()
+        self._changed()
 
 
 class GuidePage:

@@ -382,6 +382,36 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(feed(g, [[]] * 20), [{"t": "mode", "m": "idle"}])
 
 
+class TuneTest(unittest.TestCase):
+    def test_thresholds_change_while_running(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.5, 0.5, "gap")]] * 5)
+        self.assertEqual(g.mode, "idle")
+        g.tune({"pinch": 0.5})
+        feed(g, [[hand(0.5, 0.5, "gap")]] * 5)
+        self.assertEqual(g.mode, "orbit")
+
+    def test_twist_start(self):
+        small = [[turned(hand(0.5, 0.5, "pinch"), i)] for i in range(13)]
+        for degrees, rolls in ((3, True), (25, False)):
+            g = ht.Gestures()
+            g.tune({"twist_start": degrees})
+            feed(g, small)
+            self.assertEqual(g._twist.active, rolls, degrees)
+
+    def test_nonsense_is_ignored(self):
+        g = ht.Gestures()
+        before = (g.pinch_on, g.fist_on, g.smooth, g.view_hold, g._twist.engage, g._push.engage)
+        g.tune({"pinch": float("nan"), "fist": "x", "smooth": None, "view_hold": True, "no_such": 1})
+        self.assertEqual(before, (g.pinch_on, g.fist_on, g.smooth, g.view_hold, g._twist.engage, g._push.engage))
+
+    def test_only_the_session_may_tune(self):
+        self.assertEqual(ht.parse_set(b'set abc {"pinch": 0.2}', "abc"), {"pinch": 0.2})
+        for data, token in ((b'set bad {"pinch": 0.2}', "abc"), (b'set  {"pinch": 0.2}', ""), (b"set abc [1]", "abc"),
+                            (b"set abc {", "abc"), (b"quit", "abc"), (b"\xff\xfe", "abc")):
+            self.assertEqual(ht.parse_set(data, token), {})
+
+
 class SwitchedOffTest(unittest.TestCase):
     def test_roll(self):
         pk = feed(ht.Gestures(roll=False), [[turned(hand(0.5, 0.5, "pinch"), 2 * i)] for i in range(30)])

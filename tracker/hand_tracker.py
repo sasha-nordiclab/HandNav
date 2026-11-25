@@ -21,6 +21,7 @@ Packets to 127.0.0.1:PORT (JSON, each carries "k": TOKEN):
 dx/dy are in units of frame height, +x right, +y up (mirror view).
 With --embed the preview is sent to the same port as TOKEN + JPEG datagrams instead of a window.
 
+Thresholds can be changed while running with "set TOKEN {json}" on PORT+1 (see Gestures.tune).
 The tracker stops when it receives "quit" on PORT+1, when nobody listens on PORT any more
 (FreeCAD switched HandNav off, quit or crashed), or on Ctrl+C / closing its terminal window.
 """
@@ -246,6 +247,28 @@ class Gestures:
         self._push = Axis(engage=0.10, hold=0.03, step=0.006, max_jump=0.35)
 
     LIFT_GAIN = 2.0
+    def tune(self, values):
+        """Change thresholds while running; unknown names and unusable values are ignored."""
+        def num(name, lo, hi):
+            v = values.get(name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                return None
+            return min(max(float(v), lo), hi)
+
+        pinch, fist = num("pinch", 0.05, 0.8), num("fist", 0.4, 1.4)
+        if pinch is not None:
+            self.pinch_on, self.pinch_off = pinch, pinch * 1.5
+        if fist is not None:
+            self.fist_on, self.fist_off = fist, fist * 1.15
+        smooth, hold = num("smooth", 0.05, 1.0), num("view_hold", 0.1, 3.0)
+        self.smooth = self.smooth if smooth is None else smooth
+        self.view_hold = self.view_hold if hold is None else hold
+        twist, push = num("twist_start", 1.0, 90.0), num("push_start", 1.0, 100.0)
+        if twist is not None:   # degrees
+            self._twist.engage = self._wheel.engage = math.radians(twist)
+        if push is not None:    # per cent of the apparent size
+            self._push.engage = math.log(1 + push / 100)
+
     POSE_STILL = 0.07
     PALMS_AFTER = 1.5   # idle seconds before two open palms count: letting go of a zoom is not "fit"
     SQUEEZE = (0.05, 0.45)      # seconds a squeeze may last; a longer fist is a pan
@@ -512,6 +535,16 @@ class Link:
             self.packet(t="alive")
 
 
+def parse_set(data, token):
+    """The values of a "set TOKEN {json}" datagram, or {} for anything else."""
+    try:
+        word, got, body = data.decode().split(" ", 2)
+        values = json.loads(body)
+    except ValueError:
+        return {}
+    return values if word == "set" and token and got == token and isinstance(values, dict) else {}
+
+
 def bind_control(port, wait=15.0, waiting=None):
     """Bind the stop port. A tracker left over from an earlier start is told to quit first;
     `waiting()` is called about once a second meanwhile and may return True to give up."""
@@ -606,6 +639,8 @@ def main():
     ap.add_argument("--no-roll", action="store_true", help="no roll by twisting")
     ap.add_argument("--no-push", action="store_true", help="no zoom by pushing or pulling the fist")
     ap.add_argument("--no-squeeze", action="store_true", help="no fit all by squeezing twice")
+    ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
+    ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before fist zoom starts")
     ap.add_argument("--min-hand", type=float, default=0.12,
                     help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
     ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
@@ -623,6 +658,7 @@ def main():
     link = Link(args.port, token, args.standalone)
 
     stop = {"why": None}
+    tuned = {}   # thresholds received while running, not yet applied
 
     def on_signal(signum, _frame):
         stop["why"] = "stopped from the terminal"
@@ -635,9 +671,13 @@ def main():
             return stop["why"]
         try:
             while True:
-                if ctl.recv(64).startswith(b"quit"):
+                data = ctl.recv(4096)
+                if data.startswith(b"quit"):
                     stop["why"] = "switched off"
                     break
+                values = parse_set(data, token)
+                if values:
+                    tuned.update(values)
         except OSError:
             pass
         link.keepalive()
@@ -692,7 +732,7 @@ def main():
 
     threading.Thread(target=startup_watch, daemon=True).start()
     try:
-        run(args, link, stop, should_stop, say, finish, starting)
+        run(args, link, stop, should_stop, say, finish, starting, tuned)
     except SystemExit:
         raise
     except Exception as e:
@@ -733,7 +773,7 @@ class Camera:
         self._cap.release()
 
 
-def run(args, link, stop, should_stop, say, finish, starting):
+def run(args, link, stop, should_stop, say, finish, starting, tuned):
     """Load everything, open the camera and track until told to stop."""
     say("Loading the hand tracker…")
     import cv2
@@ -793,6 +833,7 @@ def run(args, link, stop, should_stop, say, finish, starting):
     g = Gestures(pinch_on=args.pinch, fist_on=args.fist, smooth=args.smooth, view_hold=args.view_hold,
                  roll=not args.no_roll, push=not args.no_push, squeeze=not args.no_squeeze)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
+    g.tune({"twist_start": args.twist_start, "push_start": args.push_start})
     picker, had = HandPicker(), False
     stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0,
              "small": 0, "size_sum": 0.0, "size_n": 0}
@@ -820,6 +861,13 @@ def run(args, link, stop, should_stop, say, finish, starting):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         ts = max(ts + 1, int((time.monotonic() - t0) * 1000))   # must be strictly increasing
         res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
+        if tuned:
+            values = dict(tuned)
+            tuned.clear()
+            g.tune(values)
+            size = values.get("min_hand")
+            if isinstance(size, (int, float)) and 0 <= size <= 1:
+                args.min_hand = size
         now = time.monotonic()
         found = [([(p.x * w / h, p.y) for p in lms], side[0].score)
                  for lms, side in zip(res.hand_landmarks, res.handedness)]
