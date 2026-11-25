@@ -23,6 +23,9 @@ SPEC = [
          "See the Gestures page for the list."),
         ("TwoHands", "bool", False, "Two-hand gestures as well",
          "Also follows the second hand: zoom by moving two pinches apart. Slower."),
+        ("FaceGuard", "bool", True, "Ignore a hand that touches the face",
+         "Scratching your nose or leaning on your hand moves nothing. A hand held out in front of the\n"
+         "face towards the camera still works. The panel shows FACE while a hand is ignored."),
         ("Turntable", "bool", False, "Keep the horizon level",
          "Orbit around the model's vertical axis. Roll is ignored then."),
     ]),
@@ -45,6 +48,9 @@ SPEC = [
         ("MinHandSize", "float", 0.12, "Smallest hand",
          "Palm size as a part of the picture height. Smaller (more distant) hands are ignored; 0 accepts all.\n"
          "The panel shows TOO SMALL with the measured size.", 0.0, 0.6, 0.01),
+        ("FaceRatio", "float", 0.85, "Hand size at the face",
+         "A hand over the face is ignored while its palm is smaller than this part of the face height.\n"
+         "Smaller lets hands close to the face through, larger ignores more.", 0.5, 1.5, 0.05),
         ("Pinch", "float", 0.30, "Pinch distance",
          "How close thumb and finger must come. Smaller is stricter, larger triggers more easily.", 0.10, 0.60, 0.02),
         ("Fist", "float", 0.90, "Fist tightness",
@@ -73,7 +79,8 @@ SPEC = [
 ]
 # thresholds that a running tracker takes over at once: parameter -> name in the tracker
 LIVE = {"MinHandSize": "min_hand", "Pinch": "pinch", "Fist": "fist", "TwistStart": "twist_start",
-        "PushStart": "push_start", "ViewHold": "view_hold", "Smooth": "smooth", "Acceleration": "accel"}
+        "PushStart": "push_start", "ViewHold": "view_hold", "Smooth": "smooth", "Acceleration": "accel",
+        "FaceRatio": "face_ratio"}
 # sliders of the panel: (title, [(parameter, label, logarithmic, right end is the smaller value)])
 SLIDERS = [
     ("Speed", [("Sensitivity", "Overall", True, False),
@@ -84,6 +91,7 @@ SLIDERS = [
                               ("TwistStart", "Roll", True, True), ("PushStart", "Push zoom", True, True),
                               ("ViewHold", "Finger views", True, True),
                               ("MinHandSize", "Distant hand", False, True),
+                              ("FaceRatio", "Near the face", False, True),
                               ("Smooth", "Response", False, False)]),
 ]
 DEFAULTS = {item[0]: (item[1], item[2]) for _, items in SPEC for item in items}
@@ -114,7 +122,7 @@ HOW = """
 the view follows your hand; open the hand to let go, move it back and grab again.</p>
 <p>Orbit turns around whatever is under the middle of the 3D view. The panel shows the camera picture with
 the points found on your hand and the name of the current action. Grey points mean the hand is seen but
-ignored because it is too small (too far away).</p>
+ignored because it is too small (too far away), red points that it touches the face.</p>
 <p>Nothing is sent over the network and no picture is stored.</p>
 """
 
@@ -160,6 +168,7 @@ def tracker_args(live=True):
         args += ["--camera-name", get("CameraName").strip()]
     for name, option, when in (("EnableRoll", "--no-roll", False), ("EnablePush", "--no-push", False),
                                ("EnablePinchPush", "--no-pinch-push", False),
+                               ("FaceGuard", "--no-face-guard", False),
                                ("EnableSqueeze", "--no-squeeze", False), ("TwoHands", "--two-hands", True)):
         if get(name) == when:
             args.append(option)

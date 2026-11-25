@@ -453,6 +453,86 @@ class AccelerationTest(unittest.TestCase):
         self.assertGreater(roll(6), 1.3 * roll(1.5))
 
 
+class FaceGuardTest(unittest.TestCase):
+    FACE = (0.4, 0.3, 0.16, 0.16)      # x, y, w, h; a hand at the same distance has a palm of about 0.10
+
+    def _guard(self, now=0.0):
+        guard = ht.FaceGuard()
+        guard.faces([self.FACE], now)
+        return guard
+
+    def test_hand_on_the_face_is_ignored(self):
+        for kind in ("open", "fist", "pinch", "relaxed"):
+            self.assertEqual(self._guard().filter([hand(0.48, 0.38, kind)], 0.1, False), [], kind)
+        self.assertEqual(self._guard().filter([hand(0.48, 0.50, "fist")], 0.1, False), [])    # chin, neck
+
+    def test_hand_held_out_in_front_of_the_face_counts(self):
+        near = scaled(hand(0.48, 0.38, "pinch"), 1.8)
+        self.assertEqual(self._guard().filter([near], 0.1, False), [near])
+
+    def test_hand_beside_the_face_counts(self):
+        for x in (0.1, 0.9):
+            h = hand(x, 0.4, "pinch")
+            self.assertEqual(self._guard().filter([h], 0.1, False), [h])
+
+    def test_without_a_face_everything_counts(self):
+        guard, h = ht.FaceGuard(), hand(0.48, 0.38, "fist")
+        guard.faces([], 0.0)
+        self.assertEqual(guard.filter([h], 0.1, False), [h])
+
+    def test_running_gesture_may_pass_over_the_face_but_not_stay(self):
+        guard, h = self._guard(), hand(0.48, 0.38, "pinch")
+        self.assertEqual(guard.filter([h], 0.1, True), [h])
+        self.assertEqual(guard.filter([h], 0.3, True), [h])
+        self.assertEqual(guard.filter([h], 0.5, True), [])
+
+    def test_hand_counts_again_a_moment_after_leaving(self):
+        guard, on, away = self._guard(), hand(0.48, 0.38, "fist"), hand(0.9, 0.4, "fist")
+        guard.filter([on], 0.1, False)
+        self.assertEqual(guard.filter([away], 0.2, False), [])
+        self.assertEqual(guard.filter([away], 0.6, False), [away])
+
+    def test_face_hidden_by_the_hand_is_remembered_then_forgotten(self):
+        guard, on = self._guard(), hand(0.48, 0.38, "fist")
+        t = 0.0
+        while t < 5:                       # not detected any more because the hand covers it
+            t += 0.1
+            self.assertEqual(guard.filter([on], t, False), [], t)
+        guard2, away = self._guard(), hand(0.9, 0.4, "open")
+        guard2.filter([away], 0.5, False)  # nobody covers it and it is gone: the person left
+        self.assertEqual(guard2.filter([on], 2.0, False), [on])
+
+    def test_hidden_face_is_not_remembered_for_ever(self):
+        guard, on, t = self._guard(), hand(0.48, 0.38, "fist"), 0.0
+        while t < 20:
+            t += 0.1
+            last = guard.filter([on], t, False)
+        self.assertEqual(last, [on])
+
+
+class FaceSearchTest(unittest.TestCase):
+    def test_squares_stay_inside_and_the_round_covers_the_picture(self):
+        w, h, s, seen = 960, 540, ht.FaceSearch(), set()
+        for _ in range(13):
+            for x, y, side in s.regions(w, h):
+                self.assertTrue(0 <= x and x + side <= w and 0 <= y and y + side <= h)
+                seen |= {(i, j) for i in range(x // 20, (x + side) // 20) for j in range(y // 20, (y + side) // 20)}
+        self.assertEqual(len(seen), (w // 20) * (h // 20))
+
+    def test_known_face_goes_first_then_the_hand(self):
+        s = ht.FaceSearch()
+        x, y, side = s.regions(960, 540, (0.5, 0.2, 0.2, 0.2), (0.1, 0.9))[0]
+        self.assertTrue(x < 0.6 * 540 < x + side and y < 0.3 * 540 < y + side)
+        x, y, side = s.regions(960, 540, None, (1.5, 0.5))[0]
+        self.assertTrue(x < 1.5 * 540 < x + side)
+
+    def test_tall_or_tiny_pictures_do_not_break(self):
+        for w, h in ((640, 480), (320, 240), (960, 720)):
+            for _ in range(13):
+                for x, y, side in ht.FaceSearch().regions(w, h, (0, 0, 0.01, 0.01)):
+                    self.assertTrue(x >= 0 and y >= 0 and side > 0 and x + side <= w and y + side <= h)
+
+
 class TuneTest(unittest.TestCase):
     def test_thresholds_change_while_running(self):
         g = ht.Gestures()

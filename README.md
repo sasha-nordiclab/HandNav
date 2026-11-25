@@ -36,6 +36,7 @@ Raise fingers with the hand pointing up and hold still for about 0.3 s to get a 
 - **Re-grip:** when your hand reaches the edge of the picture, open it, move it back and grab again, like lifting a mouse off the pad.
 - **Orbit centre:** the view turns around whatever is under the centre of the 3D view, or around the middle of the model when nothing is there.
 - **Twist and push** start only after a deliberate movement (about 9°, or 10 % of the hand's apparent size). While they are active, orbit waits.
+- **Touching your face:** a hand on the face is ignored (red points, `FACE` in the panel), so scratching your nose or leaning on your hand moves nothing. It is told apart by size: a hand held out in front of the face towards the camera looks larger and still works. If it gets in the way, adjust "Near the face" in the sliders or switch it off in the settings.
 - **Level horizon:** orbit is a free trackball. "Keep the horizon level" in the settings makes it a turntable; roll is then off.
 - **Two hands** (optional, in the settings): pinch with both hands and move them apart or together to zoom, or turn them like a wheel to roll. Open both hands before the next gesture. Two open palms held up for about 2 s fit all.
 
@@ -51,7 +52,7 @@ Raise fingers with the hand pointing up and hold still for about 0.3 s to get a 
 The last step prepares the libraries and can take a minute. The tracker goes into `~/Library/Application Support/HandNav`. Its installer downloads and sets up:
 
 - a Python environment of its own with `mediapipe` and its dependencies from PyPI (about 300 MB). With [uv](https://docs.astral.sh/uv/) installed it uses Python 3.12, which uv downloads if needed; otherwise the `python3` on your `PATH`, 3.9 or newer (the one from Apple's Command Line Tools will do).
-- the hand landmark model (about 8 MB) from Google's MediaPipe model storage, checked against a known SHA-256.
+- the hand landmark and face detection models (about 8 MB) from Google's MediaPipe model storage, checked against known SHA-256 sums. The face model only finds where a face is, to ignore hands that touch it; it recognises nobody.
 - HandNav Tracker, a tiny windowless helper app compiled from `tracker/helper.c`. This needs Apple's Command Line Tools (`xcode-select --install`). Without them the tracker runs in a Terminal window.
 
 The addon itself installs, downloads and compiles nothing. To remove the tracker: `zsh path/to/Mod/HandNav/tracker/install.sh --uninstall`.
@@ -127,4 +128,4 @@ The tests cover the gesture logic, the link to FreeCAD and camera selection with
 
 ## License
 
-MIT, see [LICENSE](LICENSE). MediaPipe and the hand landmark model are separate works by Google under their own licences (Apache-2.0) and are not part of this repository.
+MIT, see [LICENSE](LICENSE). MediaPipe and the the models are separate works by Google under their own licences (Apache-2.0) and are not part of this repository.

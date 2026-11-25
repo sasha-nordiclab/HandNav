@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0 (2026-11-25)
+
+- A hand that touches the face is ignored. Run the tracker's installer again after the update.
+
 ## 0.10.0 (2026-11-25)
 
 - Acceleration: fast movements go further, slow ones are finer. Run the tracker's installer again after the update; the panel shows the command.

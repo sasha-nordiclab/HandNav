@@ -39,9 +39,14 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "hand_landmarker.task")
-MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
-             "hand_landmarker/float16/1/hand_landmarker.task")
-MODEL_SHA256 = "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
+FACE_PATH = os.path.join(HERE, "face_detector.tflite")
+_STORE = "https://storage.googleapis.com/mediapipe-models/"
+MODELS = {   # file, address, SHA-256, name
+    "hand": (MODEL_PATH, _STORE + "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+             "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1", "hand landmark (8 MB)"),
+    "face": (FACE_PATH, _STORE + "face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+             "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f", "face detection (0.2 MB)"),
+}
 
 WRIST, THUMB_TIP, INDEX_TIP = 0, 4, 8
 TIPS, PIPS, MCPS = (8, 12, 16, 20), (6, 10, 14, 18), (5, 9, 13, 17)
@@ -138,6 +143,96 @@ def palm_size(pts):
 def big_enough(pts, min_size, busy):
     """A far-away (small) hand does not count; a running gesture may shrink a little further."""
     return palm_size(pts) >= min_size * (0.75 if busy else 1.0)
+
+
+class FaceGuard:
+    """Ignores a hand that touches the face (scratching, leaning on it, adjusting glasses).
+
+    A hand on the face is over the face in the picture and about as far from the camera as the
+    face, so its palm is clearly smaller than the face. A hand held out in front of the face
+    towards the camera looks larger and still counts."""
+
+    KEEP = 1.0          # seconds a face is remembered when it is not detected any more ...
+    KEEP_COVERED = 15.0   # ... and while a hand is over it, which hides it from the detector
+    ENTER, LEAVE = 0.3, 0.3   # seconds before a running gesture is stopped / a hand counts again
+
+    def __init__(self, ratio=0.85):
+        self.ratio = ratio
+        self._faces, self._seen, self._covered = [], -1e9, -1e9
+        self._since, self._clear, self.blocking = None, None, False
+        self.measured = None   # palm size / face height of the last hand over a face
+
+    def faces(self, boxes, now):
+        """boxes: detected faces (x, y, w, h), or [] when none was found."""
+        if boxes:
+            self._faces, self._seen = boxes, now
+
+    def face(self, now):
+        """The face found last, while it is remembered."""
+        return self._faces[0] if self._faces and now - self._seen <= self.KEEP_COVERED else None
+
+    def touching(self, pts, now):
+        if now - max(self._seen, min(self._covered, self._seen + self.KEEP_COVERED)) > self.KEEP:
+            self._faces = []
+        size, over = palm_size(pts), False
+        limit = self.ratio * (1.15 if self.blocking else 1.0)
+        touch = False
+        for x, y, w, h in self._faces:
+            # with hair, ears, chin and neck
+            inside = sum(x - 0.3 * w <= px <= x + 1.3 * w and y - 0.45 * h <= py <= y + 1.4 * h for px, py in pts)
+            if inside >= 3:
+                over, self.measured = True, size / h
+                touch = touch or size < limit * h
+        if over:
+            self._covered = now
+        return touch
+
+    def filter(self, hands, now, busy):
+        """The hands that count. busy: a gesture is in progress."""
+        if len(hands) != 1:
+            return [pts for pts in hands if not self.touching(pts, now)]
+        if self.touching(hands[0], now):
+            self._clear = None
+            self._since = now if self._since is None else self._since
+            # nothing starts at the face; a gesture that merely passes over it goes on for a moment
+            if not busy or now - self._since >= self.ENTER:
+                self.blocking = True
+        else:
+            self._since = None
+            self._clear = now if self._clear is None else self._clear
+            if now - self._clear >= self.LEAVE:
+                self.blocking = False
+        return [] if self.blocking else hands
+
+
+class FaceSearch:
+    """Where to look for a face next. The detector works on a small square picture, so in the whole
+    frame it only finds large faces; in parts of it, it finds those of a normal sitting distance."""
+
+    def __init__(self):
+        self._step = 0
+
+    @staticmethod
+    def _square(cx, cy, side, w, h):
+        side = int(min(max(side, 0.35 * h), h))
+        x = int(min(max(cx - side / 2, 0), w - side))
+        y = int(min(max(cy - side / 2, 0), h - side))
+        return x, y, side
+
+    def regions(self, w, h, face=None, hand=None):
+        """One or two squares (x, y, side) in pixels. face: (x, y, w, h), hand: (x, y), both in
+        picture heights."""
+        out = []
+        if face is not None:
+            out.append(self._square((face[0] + face[2] / 2) * h, (face[1] + face[3] / 2) * h, 2.6 * face[3] * h, w, h))
+        elif hand is not None:
+            out.append(self._square(hand[0] * h, hand[1] * h, 0.7 * h, w, h))
+        grid = [(x, 0.5 * h, h) for x in (w / 2, 0.5 * h, w - 0.5 * h)]
+        grid += [(x, y, 0.7 * h) for y in (0.35 * h, 0.65 * h)
+                 for x in (w / 2, 0.35 * h, w - 0.35 * h, 0.35 * w, 0.65 * w)]
+        out.append(self._square(*grid[self._step % len(grid)], w, h))
+        self._step += 1
+        return out
 
 
 class HandPicker:
@@ -623,27 +718,28 @@ def bind_control(port, wait=15.0, waiting=None, token=""):  # nosec B107 - none 
         time.sleep(0.7)
 
 
-def model_ok():
+def model_ok(path, sha256):
     try:
-        with open(MODEL_PATH, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest() == MODEL_SHA256
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == sha256
     except OSError:
         return False
 
 
-def ensure_model(say=print):
-    if model_ok():
+def ensure_model(say=print, which="hand"):
+    path, url, sha256, what = MODELS[which]
+    if model_ok(path, sha256):
         return
     import subprocess  # nosec B404
-    say("Downloading the hand landmark model (about 8 MB) from Google…")
-    tmp = MODEL_PATH + ".part"
+    say("Downloading the %s model from Google…" % what)
+    tmp = path + ".part"
     # curl uses the system certificates; python.org builds often have none
     subprocess.run(["/usr/bin/curl", "-fsSL", "--connect-timeout", "20", "--max-time", "600",
-                    "-o", tmp, MODEL_URL], check=True)  # nosec B603 - fixed program and address
-    os.replace(tmp, MODEL_PATH)
-    if not model_ok():
-        os.remove(MODEL_PATH)
-        raise RuntimeError("the downloaded hand landmark model does not match its checksum")
+                    "-o", tmp, url], check=True)  # nosec B603 - fixed program and address
+    os.replace(tmp, path)
+    if not model_ok(path, sha256):
+        os.remove(path)
+        raise RuntimeError("the downloaded %s model does not match its checksum" % what)
 
 
 def list_cameras():
@@ -699,6 +795,9 @@ def main():
     ap.add_argument("--accel", type=float, default=0.5, help="acceleration 0..1: fast movements go further, slow ones are finer (0 = off)")
     ap.add_argument("--twist-start", type=float, default=9.0, help="degrees of twist before roll starts")
     ap.add_argument("--push-start", type=float, default=10.0, help="per cent of size change before push zoom starts")
+    ap.add_argument("--no-face-guard", action="store_true", help="do not ignore a hand that touches the face")
+    ap.add_argument("--face-ratio", type=float, default=0.85,
+                    help="a hand over the face is ignored while its palm is smaller than this part of the face height")
     ap.add_argument("--min-hand", type=float, default=0.12,
                     help="ignore hands whose palm is smaller than this part of the picture height (0 = off)")
     ap.add_argument("--confidence", type=float, default=0.4, help="hand detection confidence (smaller = loses the hand less, more false hands)")
@@ -707,6 +806,7 @@ def main():
     args = ap.parse_args()
     if args.fetch_model:   # used by the installer
         ensure_model()
+        ensure_model(which="face")
         return
 
     token = ""  # nosec B105 - none when standalone
@@ -839,6 +939,7 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
     say("Loading the hand tracker…")
     import cv2
     import mediapipe as mp
+    import numpy as np
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision
 
@@ -853,6 +954,15 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
             min_tracking_confidence=args.confidence))
     except Exception as e:
         finish("could not load the hand landmark model (%s)" % e, ok=False)
+    face_detector = None
+    if not args.no_face_guard:
+        try:
+            ensure_model(say, "face")
+            face_detector = vision.FaceDetector.create_from_options(vision.FaceDetectorOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=FACE_PATH),
+                running_mode=vision.RunningMode.IMAGE, min_detection_confidence=0.6))
+        except Exception as e:   # the rest works without it
+            out("Face detection is not available (%s)" % e)
     if should_stop():
         finish(stop["why"])
 
@@ -896,9 +1006,10 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
                  pinch_push=not args.no_pinch_push, accel=args.accel)
     colors = {"idle": (160, 160, 160), "orbit": (80, 200, 255), "pan": (120, 255, 120), "zoom": (255, 160, 80), "lift": (255, 160, 80)}
     g.tune({"twist_start": args.twist_start, "push_start": args.push_start})
-    picker, had = HandPicker(), False
+    guard, frames_to_face = (FaceGuard(args.face_ratio) if face_detector else None), 0
+    search, picker, had = FaceSearch(), HandPicker(), False
     stats = {"t": time.monotonic(), "frames": 0, "hand": 0, "returns": 0, "rejected": 0,
-             "small": 0, "size_sum": 0.0, "size_n": 0}
+             "small": 0, "face": 0, "size_sum": 0.0, "size_n": 0}
     draw = args.embed or not args.no_preview
     window = draw and not args.embed
     say("Running on %s" % cam_name)
@@ -927,6 +1038,9 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
             values = dict(tuned)
             tuned.clear()
             g.tune(values)
+            ratio = values.get("face_ratio")
+            if guard is not None and isinstance(ratio, (int, float)) and 0.1 <= ratio <= 3:
+                guard.ratio = ratio
             size = values.get("min_hand")
             if isinstance(size, (int, float)) and 0 <= size <= 1:
                 args.min_hand = size
@@ -937,7 +1051,23 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         shown = hands
         hands = [pts for pts in shown if big_enough(pts, args.min_hand, g.mode != "idle")]
         small = shown if shown and not hands else []
-        misfits = misfits + 1 if found and not hands else 0
+        if guard is not None:
+            frames_to_face -= 1
+            if frames_to_face <= 0:   # a face moves slowly: every few frames is enough
+                frames_to_face = 4 if hands else 12
+                for x, y, side in search.regions(w, h, guard.face(now), classify(hands[0])[1] if hands else None):
+                    part = np.ascontiguousarray(rgb[y:y + side, x:x + side])
+                    r = face_detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=part))
+                    if r.detections:
+                        guard.faces([((x + d.bounding_box.origin_x) / h, (y + d.bounding_box.origin_y) / h,
+                                      d.bounding_box.width / h, d.bounding_box.height / h)
+                                     for d in r.detections], now)
+                        break
+        at_face = []
+        if guard is not None and hands:
+            at_face, hands = hands, guard.filter(hands, now, g.mode != "idle")
+            at_face = [pts for pts in at_face if pts not in hands]
+        misfits = misfits + 1 if found and not hands and not at_face else 0
         if misfits >= (15 if small else 5):
             # something that is no hand (a face, say) or too small is being followed: an empty picture makes the
             # tracker drop it and search again
@@ -948,6 +1078,7 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         stats["frames"] += 1
         stats["hand"] += bool(hands)
         stats["small"] += bool(small)
+        stats["face"] += bool(at_face)
         if shown:
             size = palm_size(shown[0])
             stats["size_sum"] += size
@@ -958,10 +1089,13 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         had = bool(hands)
         if now - stats["t"] >= 10:
             out("%.0f fps at %dx%d, hand in %d%% of frames, found again %d times, %d false detections, "
-                "too small in %d%%, mean palm size %.2f"
+                "too small in %d%%, at the face in %d%%, mean palm size %.2f, face seen: %s, last palm / face over it: %s"
                 % (stats["frames"] / (now - stats["t"]), w, h, 100 * stats["hand"] // stats["frames"],
                    stats["returns"], stats["rejected"],
-                   100 * stats["small"] // stats["frames"], stats["size_sum"] / max(stats["size_n"], 1)))
+                   100 * stats["small"] // stats["frames"],
+                   100 * stats["face"] // stats["frames"], stats["size_sum"] / max(stats["size_n"], 1),
+                   "yes" if guard is not None and now - guard._seen < 2 else "no",
+                   "%.2f" % guard.measured if guard is not None and guard.measured else "-"))
             stats = dict.fromkeys(stats, 0)
             stats["t"] = now
         for pkt in g.update(hands, now):
@@ -974,7 +1108,12 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
             for pts in small:   # seen, but ignored: grey, with its size
                 for x, y in pts:
                     cv2.circle(frame, (int(x * h), int(y * h)), int(2 * unit), (120, 120, 120), -1)
+            for pts in at_face:   # seen, but ignored: at the face
+                for x, y in pts:
+                    cv2.circle(frame, (int(x * h), int(y * h)), int(2 * unit), (90, 90, 230), -1)
             label = g.label if not small else "TOO SMALL %.2f < %.2f" % (palm_size(small[0]), args.min_hand)
+            if at_face:
+                label = "FACE"
             cv2.putText(frame, label, (int(12 * unit), int(34 * unit)), cv2.FONT_HERSHEY_SIMPLEX, unit,
                         colors[g.mode], int(2 * unit))
         if args.embed:

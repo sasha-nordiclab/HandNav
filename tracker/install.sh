@@ -3,7 +3,7 @@
 # Installs the HandNav tracker, the separate program that watches the camera, for this user:
 #   ~/Library/Application Support/HandNav
 # It downloads mediapipe and its dependencies from PyPI (about 300 MB installed) into an environment
-# of its own and the hand landmark model (about 8 MB) from Google. Nothing is installed into FreeCAD.
+# of its own and the hand and face detection models (about 8 MB) from Google. Nothing is installed into FreeCAD.
 #
 #   install.sh              install or update
 #   install.sh --uninstall  remove everything again
@@ -19,7 +19,7 @@ if [ "$1" = "--uninstall" ]; then
   # only what this installer and the addon put there
   cd "$DST" 2>/dev/null || { echo "The tracker is not installed."; exit 0; }
   rm -rf .venv HandNavTracker.app .cache
-  rm -f hand_tracker.py run_tracker.command requirements.txt VERSION hand_landmarker.task \
+  rm -f hand_tracker.py run_tracker.command requirements.txt VERSION hand_landmarker.task face_detector.tflite \
         args secret tracker.log .helper-ok .env-ok
   cd / && rmdir "$DST" 2>/dev/null || true
   echo "The HandNav tracker was removed."
