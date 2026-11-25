@@ -31,6 +31,9 @@ Raise fingers with the hand pointing up and hold still for about 0.6 s to get a 
 | Index + middle + ring | Right | Left |
 | Index + little finger | Isometric | (same) |
 | Little finger | Fit all | (same) |
+| Both hands open, fingers up, thumbs out | Fit all | |
+
+Two open palms count only after both hands have been idle for about 1.5 s, so letting go of a zoom does not trigger it.
 
 - **Re-grip:** when your hand reaches the edge of the frame, open it, move it back and grab again, like lifting a mouse off the pad.
 - **After a zoom:** open both hands before starting the next gesture. Until then nothing moves, so letting go with one hand first does not spin the view.

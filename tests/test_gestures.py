@@ -293,6 +293,21 @@ class ViewTest(unittest.TestCase):
             pk = feed(g, [[fingers(0.5, 0.5, raised, thumb)]] * 60)
             self.assertEqual(pk, [{"t": "view", "v": name}], name)
 
+    def test_two_open_palms_fit_all_once(self):
+        g = ht.Gestures()
+        two = [fingers(0.3, 0.5, (1, 1, 1, 1), True), fingers(0.8, 0.5, (1, 1, 1, 1), True)]
+        self.assertEqual(feed(g, [two] * 120), [{"t": "view", "v": "fit"}])
+
+    def test_one_open_palm_is_only_a_pause(self):
+        g = ht.Gestures()
+        self.assertEqual(feed(g, [[fingers(0.5, 0.5, (1, 1, 1, 1), True)]] * 120), [])
+
+    def test_letting_go_of_a_zoom_does_not_fit_all(self):
+        g = ht.Gestures()
+        feed(g, [[hand(0.3, 0.5, "pinch"), hand(0.8, 0.5, "pinch")]] * 5)
+        two = [fingers(0.3, 0.5, (1, 1, 1, 1), True), fingers(0.8, 0.5, (1, 1, 1, 1), True)]
+        self.assertNotIn("view", kinds(feed(g, [two] * 40)))
+
     def test_short_or_moving_pose_gives_nothing(self):
         g = ht.Gestures()
         self.assertEqual(feed(g, [[fingers(0.5, 0.5, (1, 0, 0, 0), False)]] * 10 + [[]] * 5), [])

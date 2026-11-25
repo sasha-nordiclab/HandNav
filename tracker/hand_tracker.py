@@ -74,6 +74,7 @@ POSES = {
     (1, 1, 1, 0, False): "right", (1, 1, 1, 0, True): "left",
     (1, 0, 0, 1, None): "iso",
     (0, 0, 0, 1, None): "fit",
+    (1, 1, 1, 1, True): "palm",   # no view by itself; two of them: fit
 }
 
 
@@ -170,6 +171,7 @@ class Gestures:
         self._raw = None      # last raw control value (point, or (distance, 0) for zoom)
         self._s = None        # smoothed control value
         self._prev = None     # smoothed value at the last emitted packet
+        self._idle_n = 0      # frames in a row with hands in view and no gesture
         self._pose, self._pose_at, self._pose_n, self._pose_done = None, None, 0, False
         self._twist = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=2 * math.pi)
         self._wheel = Axis(engage=0.15, hold=0.04, step=0.008, max_jump=0.6, period=math.pi)
@@ -177,6 +179,7 @@ class Gestures:
 
     POSE_FRAMES = 18  # how long raised fingers must be held still (about 0.6 s)
     POSE_STILL = 0.05
+    PALMS_AFTER = 45  # idle frames before two open palms count: letting go of a zoom is not "fit"
     MEMORY = 4        # frames a hand keeps its held gesture while undetected
     MATCH = 0.25      # how far a hand can move between frames and still be the same hand
 
@@ -277,10 +280,16 @@ class Gestures:
     def _view(self, hands, hands_pts):
         """Raised fingers held still, while nothing else is going on, ask once for a standard view."""
         pose, at = None, None
+        self._idle_n = self._idle_n + 1 if self.mode == "idle" and hands else 0
         if self.mode == "idle" and not any(g != "open" for g, _ in hands):
             shown = [(pose_of(pts), c) for (_, c), pts in zip(hands, hands_pts) if pose_of(pts)]
-            if len(shown) == 1:
+            palms = [c for p, c in shown if p == "palm"]
+            shown = [x for x in shown if x[0] != "palm"]
+            if len(shown) == 1 and not palms:
                 pose, at = shown[0]
+            elif len(palms) == 2 and not shown and self._idle_n >= self.PALMS_AFTER:
+                a, b = palms
+                pose, at = "fit", ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
         if pose is None or pose != self._pose or _d(at, self._pose_at) > self.POSE_STILL:
             # a view is given once per pose: moving the same raised fingers does not repeat it
             self._pose_done = self._pose_done and pose is not None and pose == self._pose
