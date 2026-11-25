@@ -1,21 +1,31 @@
 #!/bin/zsh
 # Install HandNav into a FreeCAD user Mod folder (macOS).
-#   ./install.sh                 newest FreeCAD version found
+#   ./install.sh                 the newest FreeCAD version that has a settings folder
 #   ./install.sh /path/to/Mod    a specific Mod folder
 set -e
 SRC=${0:A:h}
 if [ -n "$1" ]; then
   MOD=$1
+  [ -d "$MOD" ] || { echo "Mod folder not found: $MOD" >&2; exit 1; }
 else
   BASE="$HOME/Library/Application Support/FreeCAD"
-  MOD=$(ls -d "$BASE"/v*/Mod 2>/dev/null | sort -V | tail -1)
-  [ -z "$MOD" ] && MOD="$BASE/Mod"
+  dirs=("$BASE"/v*(N/n))   # v1-1 … v27-1, numerically sorted; empty when there are none
+  if (( ${#dirs} )); then
+    MOD="${dirs[-1]}/Mod"
+  elif [ -d "$BASE" ]; then
+    MOD="$BASE/Mod"        # FreeCAD releases without per-version folders
+  else
+    echo "No FreeCAD settings folder at $BASE. Start FreeCAD once, or pass a Mod folder." >&2
+    exit 1
+  fi
+  mkdir -p "$MOD"
 fi
-[ -d "$MOD" ] || { echo "Mod folder not found: $MOD" >&2; exit 1; }
 DST="$MOD/HandNav"
 mkdir -p "$DST/tracker"
 cp "$SRC"/{InitGui.py,handnav_gui.py,handnav.svg,package.xml,LICENSE,README.md} "$DST/"
 cp "$SRC"/tracker/{hand_tracker.py,run_tracker.command,requirements.txt} "$DST/tracker/"
 chmod +x "$DST/tracker/run_tracker.command"
+# a ZIP downloaded with a browser is quarantined; Terminal would refuse to run the launcher
+xattr -dr com.apple.quarantine "$DST" 2>/dev/null || true
 echo "HandNav installed to $DST"
 echo "Restart FreeCAD, then press the HandNav button on the View toolbar."

@@ -1,2 +1,2 @@
-mediapipe>=0.10.14
-opencv-python
+# opencv (cv2) comes with mediapipe as opencv-contrib-python; do not add opencv-python next to it
+mediapipe>=0.10.14,<2

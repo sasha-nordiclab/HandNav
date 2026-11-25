@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import secrets
 import shlex
 import socket
 import subprocess
@@ -14,8 +15,13 @@ from pivy import coin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACKER_DIR = os.path.join(HERE, "tracker")
+VENV_OK = os.path.join(TRACKER_DIR, ".venv", ".handnav-ok")   # written by run_tracker.command
 PARAMS = "User parameter:BaseApp/Preferences/Mod/HandNav"
-MODE_TEXT = {"idle": "idle", "orbit": "orbit", "pan": "pan", "zoom": "zoom"}
+COMMAND = "HandNav_Toggle"
+NAV_NAME = "HandNavNavigator"
+# FreeCAD.app points these into its own bundle; a child Python (and a Terminal started by
+# `open`, which inherits them) breaks if they leak out.
+SCRUB_ENV = ("PYTHONHOME", "PYTHONPATH", "PREFIX", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
 
 
 def _p():
@@ -24,9 +30,24 @@ def _p():
 
 def _status(text):
     try:
-        Gui.getMainWindow().statusBar().showMessage("HandNav: " + text, 3000)
+        Gui.getMainWindow().statusBar().showMessage("HandNav: " + text, 4000)
     except Exception:
         pass
+
+
+def _set_button(checked):
+    """Make the toolbar/menu toggle show the real state without triggering the command."""
+    for action in Gui.getMainWindow().findChildren(QtGui.QAction, COMMAND):
+        action.blockSignals(True)
+        action.setChecked(checked)
+        action.blockSignals(False)
+
+
+def _num(m, key, lo, hi):
+    v = float(m[key])
+    if not math.isfinite(v):
+        raise ValueError(key)
+    return min(max(v, lo), hi)
 
 
 class _PreviewLabel(QtWidgets.QLabel):
@@ -35,25 +56,38 @@ class _PreviewLabel(QtWidgets.QLabel):
 
 
 class PreviewDock(QtWidgets.QDockWidget):
-    """Camera preview sent by the tracker, shown inside the FreeCAD window."""
+    """Camera preview and tracker status, shown inside the FreeCAD window."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, first_run):
         super().__init__("HandNav", parent)
         self.setObjectName("HandNavDock")
-        self.label = _PreviewLabel("Waiting for the tracker…")
+        self.label = _PreviewLabel()
         self.label.setAlignment(QtCore.Qt.AlignCenter)
+        self.label.setWordWrap(True)
         self.label.setMinimumSize(160, 120)
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setWidget(self.label)
-        self._last = 0.0
+        self._started = time.monotonic()
+        self._patience = 300.0 if first_run else 20.0
+        self._last = 0.0      # time of the last packet from the tracker
+        self._final = False   # the tracker said goodbye: keep its message on screen
+        self.set_text("First run: the tracker is being installed in the Terminal window.\n"
+                      "This can take a few minutes." if first_run else "Starting the tracker…")
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._check)
         self._timer.start(1000)
 
+    def alive(self):
+        self._last = time.monotonic()
+
+    def set_text(self, text, final=False):
+        self._final = final
+        self.label.setText(text)
+
     def show_jpeg(self, data):
         pix = QtGui.QPixmap()
         if pix.loadFromData(data, "JPG"):
-            self._last = time.monotonic()
+            self._final = False
             self.label.setPixmap(pix.scaled(self.label.size(), QtCore.Qt.KeepAspectRatio,
                                             QtCore.Qt.SmoothTransformation))
 
@@ -61,18 +95,27 @@ class PreviewDock(QtWidgets.QDockWidget):
         self.setWindowTitle("HandNav — " + text)
 
     def _check(self):
-        if self._last and time.monotonic() - self._last > 2.0:
-            self._last = 0.0
-            self.label.setText("No signal from the tracker")
+        if self._final:
+            return
+        now = time.monotonic()
+        if self._last and now - self._last > 2.5:
+            self.set_text("No signal from the tracker.\nSwitch HandNav off and on to restart it.")
+        elif not self._last and now - self._started > self._patience:
+            self.set_text("The tracker has not started.\nLook at its Terminal window for the reason.")
 
 
 class Navigator(QtCore.QObject):
     def __init__(self):
         super().__init__(Gui.getMainWindow())
+        self.setObjectName(NAV_NAME)
         self.sock = None
-        self.port = 47800
         self.dock = None
+        self.port = 47800
+        self.token = ""
         self._depth = None  # distance from the camera to the orbit pivot, along the view axis
+        app = QtCore.QCoreApplication.instance()
+        if app is not None:  # do not leave the camera on when FreeCAD quits
+            app.aboutToQuit.connect(self.stop)
 
     # --- lifecycle -------------------------------------------------------
     def running(self):
@@ -85,25 +128,39 @@ class Navigator(QtCore.QObject):
         self.port = p.GetInt("Port", 47800)
         sock = QtNetwork.QUdpSocket(self)
         if not sock.bind(QtNetwork.QHostAddress(QtNetwork.QHostAddress.LocalHost), self.port):
-            App.Console.PrintError("HandNav: port %d is busy (%s)\n" % (self.port, sock.errorString()))
+            msg = "port %d is busy (%s). Is HandNav on in another FreeCAD window?" % (self.port, sock.errorString())
+            App.Console.PrintError("HandNav: %s\n" % msg)
+            _status(msg)
             sock.deleteLater()
             return False
         sock.readyRead.connect(self._read)
         self.sock = sock
+        self.token = secrets.token_hex(8)
+        self._depth = None
+        auto = launch_tracker and p.GetBool("AutoStartTracker", True)
+        first_run = auto and not os.path.exists(VENV_OK)
         if p.GetBool("EmbedPreview", True):
             mw = Gui.getMainWindow()
-            self.dock = PreviewDock(mw)
+            self.dock = PreviewDock(mw, first_run)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
             mw.resizeDocks([self.dock], [270], QtCore.Qt.Vertical)
-        if launch_tracker and p.GetBool("AutoStartTracker", True):
-            self.launch_tracker()
+        try:
+            self._write_args()
+            if auto:
+                self._launch(background=self.dock is not None and not first_run)
+            elif self.dock is not None:
+                self.dock.set_text("Waiting for the tracker.\nRun tracker/run_tracker.command to start it.")
+        except OSError as e:
+            App.Console.PrintError("HandNav: could not start the tracker (%s)\n" % e)
+            self.stop()
+            return False
         _status("on")
         return True
 
     def stop(self):
         if not self.running():
             return
-        try:  # ask the tracker to exit
+        try:  # ask the tracker to exit; it also exits by itself once this port is closed
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.sendto(b"quit", ("127.0.0.1", self.port + 1))
             s.close()
@@ -118,10 +175,10 @@ class Navigator(QtCore.QObject):
             self.dock = None
         _status("off")
 
-    def launch_tracker(self):
-        """Run the tracker in Terminal: FreeCAD.app itself has no camera permission entry."""
+    def _write_args(self):
+        """Tracker arguments, one per line: the launcher reads them without any shell evaluation."""
         p = _p()
-        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port)]
+        args = ["--camera", str(p.GetInt("Camera", -1)), "--port", str(self.port), "--token", self.token]
         name = p.GetString("CameraName", "").strip()
         if name:
             args += ["--camera-name", name]
@@ -131,12 +188,18 @@ class Navigator(QtCore.QObject):
             args += shlex.split(p.GetString("TrackerArgs", ""))
         except ValueError as e:
             App.Console.PrintWarning("HandNav: ignoring TrackerArgs (%s)\n" % e)
-        # one argument per line: the launcher reads them without any shell evaluation
-        with open(os.path.join(TRACKER_DIR, "args"), "w") as f:
+        path = os.path.join(TRACKER_DIR, "args")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write("".join(a.replace("\n", " ") + "\n" for a in args))
-        # -g: with the preview embedded, Terminal stays in the background
-        opts = ["-g"] if self.dock is not None else []
-        subprocess.Popen(["open"] + opts + ["-a", "Terminal", os.path.join(TRACKER_DIR, "run_tracker.command")])
+        os.chmod(path, 0o600)
+
+    def _launch(self, background):
+        """Run the tracker in Terminal: FreeCAD.app itself has no camera permission entry."""
+        env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+        cmd = ["open"] + (["-g"] if background else []) + ["-a", "Terminal",
+                                                           os.path.join(TRACKER_DIR, "run_tracker.command")]
+        subprocess.Popen(cmd, env=env)
 
     # --- packets ---------------------------------------------------------
     def _read(self):
@@ -144,73 +207,127 @@ class Navigator(QtCore.QObject):
         pan = [0.0, 0.0]
         zoom = 1.0
         frame = None
+        got = False
+        tok = self.token.encode()
         while self.sock is not None and self.sock.hasPendingDatagrams():
             try:
                 data = bytes(self.sock.receiveDatagram().data())
-                if data[:2] == b"\xff\xd8":  # JPEG preview frame
-                    frame = data
+                if data.startswith(tok) and data[len(tok):len(tok) + 2] == b"\xff\xd8":  # JPEG preview frame
+                    frame, got = data[len(tok):], True
                     continue
                 m = json.loads(data)
+                if not isinstance(m, dict) or m.get("k") != self.token:
+                    continue  # not from the tracker this session started
+                got = True
                 t = m.get("t")
                 if t == "orbit":
-                    orbit[0] += float(m["dx"]); orbit[1] += float(m["dy"])
+                    orbit[0] += _num(m, "dx", -1, 1)
+                    orbit[1] += _num(m, "dy", -1, 1)
                 elif t == "pan":
-                    pan[0] += float(m["dx"]); pan[1] += float(m["dy"])
+                    pan[0] += _num(m, "dx", -1, 1)
+                    pan[1] += _num(m, "dy", -1, 1)
                 elif t == "zoom":
-                    zoom *= float(m["k"])
+                    zoom *= _num(m, "k2", 0.5, 2.0)
                 elif t == "mode":
                     self._depth = None  # new gesture: pick the pivot again
-                    text = MODE_TEXT.get(m.get("m"), str(m.get("m")))
-                    if self.dock is not None:
-                        self.dock.set_mode(text)
-                    else:
-                        _status(text)
+                    self._show_mode(str(m.get("m")))
+                elif t == "status":
+                    self._show_text(str(m.get("msg", "")))
+                elif t == "bye":
+                    self._bye(str(m.get("msg", "")), bool(m.get("ok", True)))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-        if frame is not None and self.dock is not None:
-            self.dock.show_jpeg(frame)
+        if self.dock is not None:
+            if got:
+                self.dock.alive()
+            if frame is not None:
+                self.dock.show_jpeg(frame)
         try:
             self.apply(orbit, pan, zoom)
         except Exception as e:
             App.Console.PrintWarning("HandNav: %s\n" % e)
 
+    def _show_mode(self, mode):
+        if self.dock is not None:
+            self.dock.set_mode(mode)
+        else:
+            _status(mode)
+
+    def _show_text(self, text):
+        if self.dock is not None:
+            self.dock.set_text(text)
+        else:
+            _status(text)
+
+    def _bye(self, msg, ok):
+        if not ok:
+            App.Console.PrintError("HandNav tracker: %s\n" % msg)
+        text = ("Tracker stopped: %s." if ok else "Tracker error: %s") % msg
+        if self.dock is not None:
+            self.dock.set_text(text + "\nSwitch HandNav off and on to restart it.", final=True)
+        else:
+            _status(text)
+
     # --- camera ----------------------------------------------------------
-    def _pivot_depth(self, view, pos, look, fallback):
-        """Depth of the scene centre along the view axis, so orbit turns the model in place.
-        (An orthographic camera's own focalDistance is often a meaningless 1 mm.)"""
+    def _pivot_depth(self, view, pos, look, fallback, ortho):
+        """Depth of the orbit pivot along the view axis, chosen once per gesture: the geometry
+        under the centre of the view, else the centre of the scene. (An orthographic camera's
+        own focalDistance is often a meaningless 1 mm.)"""
         if self._depth is None:
-            self._depth = fallback
+            depth = None
             try:
-                act = coin.SoGetBoundingBoxAction(coin.SbViewportRegion())
-                act.apply(view.getSceneGraph())
-                box = act.getBoundingBox()
-                if not box.isEmpty():
-                    self._depth = (box.getCenter() - pos).dot(look)
+                w, h = view.getSize()
+                hit = view.getObjectInfo((w // 2, h // 2))
+                if hit:
+                    depth = (coin.SbVec3f(hit["x"], hit["y"], hit["z"]) - pos).dot(look)
             except Exception:
                 pass
+            if depth is None:
+                try:
+                    act = coin.SoGetBoundingBoxAction(coin.SbViewportRegion())
+                    act.apply(view.getSceneGraph())
+                    box = act.getBoundingBox()
+                    if not box.isEmpty():
+                        depth = (box.getCenter() - pos).dot(look)
+                except Exception:
+                    pass
+            if depth is None or not math.isfinite(depth) or (not ortho and depth <= 0):
+                depth = fallback   # a perspective camera cannot orbit a point behind itself
+            self._depth = depth
         return self._depth
 
     def apply(self, orbit=(0.0, 0.0), pan=(0.0, 0.0), zoom=1.0):
+        if not (orbit[0] or orbit[1] or pan[0] or pan[1] or zoom != 1.0):
+            return
         view = Gui.activeView()
         if view is None or not hasattr(view, "getCameraNode"):
             return
         cam = view.getCameraNode()
         p = _p()
-        rot = cam.orientation.getValue()
-        pos = cam.position.getValue()
+        # copies: pivy hands out references that change with the camera
+        rot = coin.SbRotation(*cam.orientation.getValue().getValue())
+        pos = coin.SbVec3f(*cam.position.getValue().getValue())
         fd = cam.focalDistance.getValue()
         look = rot.multVec(coin.SbVec3f(0, 0, -1))
         ortho = view.getCameraType() == "Orthographic"
 
         if orbit[0] or orbit[1]:
             g = p.GetFloat("OrbitGain", 4.0)
-            sx = -1.0 if p.GetBool("InvertX", False) else 1.0
-            sy = -1.0 if p.GetBool("InvertY", False) else 1.0
-            local = (coin.SbRotation(coin.SbVec3f(0, 1, 0), -orbit[0] * g * sx)
-                     * coin.SbRotation(coin.SbVec3f(1, 0, 0), orbit[1] * g * sy))
-            depth = self._pivot_depth(view, pos, look, fd)
+            yaw = -orbit[0] * g * (-1.0 if p.GetBool("InvertX", False) else 1.0)
+            pitch = orbit[1] * g * (-1.0 if p.GetBool("InvertY", False) else 1.0)
+            depth = self._pivot_depth(view, pos, look, fd, ortho)
             pivot = pos + look * depth
-            rot = local * rot
+            # Coin applies the left factor first.
+            if p.GetBool("Turntable", True):
+                # yaw about the world Z axis, pitch about the camera's X axis: the horizon stays level
+                if rot.multVec(coin.SbVec3f(0, 1, 0))[2] < 0:
+                    yaw = -yaw   # camera is upside down
+                rot = (coin.SbRotation(coin.SbVec3f(1, 0, 0), pitch) * rot
+                       * coin.SbRotation(coin.SbVec3f(0, 0, 1), yaw))
+            else:
+                # free trackball: both rotations about the camera's own axes
+                rot = (coin.SbRotation(coin.SbVec3f(0, 1, 0), yaw)
+                       * coin.SbRotation(coin.SbVec3f(1, 0, 0), pitch) * rot)
             look = rot.multVec(coin.SbVec3f(0, 0, -1))
             cam.orientation.setValue(rot)
             pos = pivot - look * depth
@@ -239,8 +356,18 @@ _nav = None
 
 
 def navigator():
+    """The one Navigator of this FreeCAD session (survives a reload of this module)."""
     global _nav
     if _nav is None:
+        old = Gui.getMainWindow().findChild(QtCore.QObject, NAV_NAME)
+        if old is not None:  # left by an earlier copy of this module: shut it down
+            try:
+                old.stop()
+            except Exception:
+                pass
+            old.setObjectName("")
+            old.deleteLater()
+            _set_button(False)
         _nav = Navigator()
     return _nav
 
@@ -256,7 +383,9 @@ class ToggleCommand:
     def Activated(self, checked=0):
         nav = navigator()
         if checked:
-            nav.start()
+            if not nav.start():
+                # FreeCAD has already drawn the button as pressed: put it back
+                QtCore.QTimer.singleShot(0, lambda: _set_button(False))
         else:
             nav.stop()
 
@@ -266,12 +395,13 @@ class ToggleCommand:
 
 class _Manipulator:
     def modifyToolBars(self):
-        return [{"append": "HandNav_Toggle", "toolBar": "View"}]
+        return [{"append": COMMAND, "toolBar": "View"}]
 
     def modifyMenuBar(self):
-        return [{"append": "HandNav_Toggle", "menuItem": "Std_ViewFitAll"}]
+        # directly in the View menu, after "Fullscreen"
+        return [{"insert": COMMAND, "menuItem": "Std_ViewDockUndockFullscreen", "after": ""}]
 
 
 def setup():
-    Gui.addCommand("HandNav_Toggle", ToggleCommand())
+    Gui.addCommand(COMMAND, ToggleCommand())
     Gui.addWorkbenchManipulator(_Manipulator())
