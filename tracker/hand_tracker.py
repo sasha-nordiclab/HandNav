@@ -986,11 +986,34 @@ def main():
         finish("unexpected error: %s: %s" % (type(e).__name__, e), ok=False)
 
 
+class Pace:
+    """How often to analyse a frame. Looking for a hand in the whole picture is the expensive part,
+    so the full frame rate is kept for gestures, and the search slows down while nothing happens."""
+
+    GESTURE, HAND, SEARCH, ASLEEP = 0.0, 1 / 15, 1 / 8, 1 / 4   # seconds between analysed frames
+    AFTER_HAND, BEFORE_SLEEP = 1.0, 30.0
+
+    def __init__(self):
+        self._hand_at = -1e9
+
+    def interval(self, now, hand, busy):
+        if busy:
+            self._hand_at = now
+            return self.GESTURE
+        if hand:
+            self._hand_at = now
+            return self.HAND
+        if now - self._hand_at < self.AFTER_HAND:   # the hand is probably about to come back
+            return self.HAND
+        return self.ASLEEP if now - self._hand_at > self.BEFORE_SLEEP else self.SEARCH
+
+
 class Camera:
     """Reads frames in the background, so that analysing one and waiting for the next overlap."""
 
     def __init__(self, cap):
         self._cap, self._frame, self._seq, self._stop = cap, None, 0, False
+        self.interval = 0.0   # seconds between frames the analysis wants; reading faster is wasted
         self._cond = threading.Condition()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -1004,6 +1027,8 @@ class Camera:
             with self._cond:
                 self._frame, self._seq = frame, self._seq + 1
                 self._cond.notify()
+            if self.interval > 0.04:
+                time.sleep(self.interval - 0.035)   # the camera keeps only its newest frame
 
     def next(self, seen, timeout=0.1):
         """(sequence number, newest frame) newer than `seen`, or (seen, None) after the timeout."""
@@ -1025,6 +1050,8 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
     import mediapipe as mp
     import numpy as np
     from mediapipe.tasks import python as mp_python
+
+    cv2.setNumThreads(1)   # the pictures are small: more threads only cost
     from mediapipe.tasks.python import vision
 
     try:
@@ -1066,8 +1093,8 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         if should_stop():
             finish(stop["why"])
         cap = cv2.VideoCapture(cam_index, cv2.CAP_AVFOUNDATION)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)   # the analysed size: nothing to scale down
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
         ok, _ = cap.read()
         if ok:
             break
@@ -1101,8 +1128,36 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
         % ("q in the preview window, or Ctrl+C here" if window else "the HandNav button in FreeCAD, or Ctrl+C here"))
     n, ts, t0, bad_since = 0, -1, time.monotonic(), None
     cap, seq, misfits = Camera(cap), 0, 0
+    pace, due, last_preview = Pace(), 0.0, 0.0
+    state = {"standby": False, "preview": True}   # set by the addon
+
+    def open_camera():
+        c = cv2.VideoCapture(cam_index, cv2.CAP_AVFOUNDATION)
+        c.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+        c.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+        return Camera(c)
+
     while not should_stop():
+        if tuned:
+            for key in ("standby", "preview"):
+                if isinstance(tuned.get(key), bool):
+                    state[key] = tuned.pop(key)
+        if state["standby"]:
+            if cap is not None:   # FreeCAD is in the background: switch the camera off
+                cap.release()
+                cap, seq, bad_since = None, 0, None
+                if g.mode != "idle":
+                    for pkt in g._switch("idle", None):
+                        link.packet(**pkt)
+                say("Paused while FreeCAD is in the background")
+            time.sleep(0.2)
+            continue
+        if cap is None:
+            cap = open_camera()
+            say("Running on %s" % cam_name)
         seq, frame = cap.next(seq)
+        if frame is not None and time.monotonic() < due:
+            continue   # not wanted yet
         if frame is None:
             now = time.monotonic()
             bad_since = bad_since or now
@@ -1194,6 +1249,9 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
             stats["t"] = now
         for pkt in g.update(hands, now):
             link.packet(**pkt)
+        busy = g.mode != "idle" or g._lock_at is not None or g._sq_on is not None or g._sq_end is not None
+        cap.interval = pace.interval(now, bool(hands), busy)
+        due = now + cap.interval - 0.01
         if draw:
             unit = w / 640
             for pts in hands:   # only the hands that count
@@ -1214,7 +1272,8 @@ def run(args, link, stop, should_stop, say, finish, starting, tuned):
                         colors[g.mode], int(2 * unit))
         if args.embed:
             n += 1
-            if n % 2 == 0:  # ~15 fps is plenty for a preview
+            if state["preview"] and now - last_preview >= 0.095:   # ~10 fps is plenty for a preview
+                last_preview = now
                 small = cv2.resize(frame, (320, int(h * 320 / w)))
                 ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 60])
                 if ok:

@@ -72,6 +72,9 @@ SPEC = [
     ]),
     ("Camera and window", [
         ("CameraName", "camera", "", "Camera", "Which camera to use."),
+        ("PauseInBackground", "bool", True, "Pause while FreeCAD is in the background",
+         "The camera is switched off while you work in another application, which saves power,\n"
+         "and gestures cannot move FreeCAD by accident."),
         ("EmbedPreview", "bool", True, "Show the camera in a FreeCAD panel",
          "Otherwise a separate window opens. Applies the next time HandNav is switched on."),
         ("ShowInAllWorkbenches", "bool", False, "Show the HandNav button in every workbench",

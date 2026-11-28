@@ -611,6 +611,26 @@ class LockTest(unittest.TestCase):
         self.assertNotIn("lock", kinds(feed(ht.Gestures(lock=False), self.THUMB * 60)))
 
 
+class PaceTest(unittest.TestCase):
+    def test_full_rate_only_while_something_happens(self):
+        p = ht.Pace()
+        self.assertEqual(p.interval(0.0, True, True), 0.0)
+        self.assertEqual(p.interval(0.1, True, False), p.HAND)
+        self.assertEqual(p.interval(0.5, False, False), p.HAND)    # just lost: it may come back
+        self.assertEqual(p.interval(2.0, False, False), p.SEARCH)
+        self.assertEqual(p.interval(40.0, False, False), p.ASLEEP)
+        self.assertEqual(p.interval(40.1, False, True), 0.0)       # wakes at once
+        self.assertLess(p.ASLEEP, 0.3)                             # a hand is still found quickly
+
+    def test_views_and_squeezes_still_work_at_the_slower_rates(self):
+        for fps in (15, 8):
+            g, t, pk = ht.Gestures(), 0.0, []
+            for _ in range(int(fps * 1.5)):
+                t += 1 / fps
+                pk += g.update([fingers(0.5, 0.5, (1, 1, 0, 0), False)], t)
+            self.assertEqual(pk, [{"t": "view", "v": "top"}], fps)
+
+
 class TuneTest(unittest.TestCase):
     def test_thresholds_change_while_running(self):
         g = ht.Gestures()

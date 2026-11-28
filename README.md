@@ -82,6 +82,10 @@ Everything is stored under `BaseApp/Preferences/Mod/HandNav`. A few parameters e
 | `TrackerArgs` | String | empty | Extra tracker options, e.g. `--width 640`. They override the settings. |
 | `Port` | Integer | `47800` | UDP port on 127.0.0.1. The tracker listens on the next one. |
 
+## Power use
+
+The tracker analyses every camera frame only during a gesture. With a hand in view and nothing going on it looks 15 times a second, without a hand 8 times, and after 30 s without a hand 4 times. While FreeCAD is in the background the camera is switched off ("Pause while FreeCAD is in the background" in the settings). The camera picture is sent to the panel at most 10 times a second, and only while the panel is visible.
+
 ## Privacy
 
 - The camera is used only while HandNav is on. Pictures are analysed on your Mac, shown in the FreeCAD panel and never stored or sent anywhere by HandNav.

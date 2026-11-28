@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.0 (2026-11-28)
+
+- Much less processor use: full frame rate only during gestures, the camera is off while FreeCAD is in the background, the preview only while the panel is visible. Run the tracker's installer again after the update.
+
 ## 0.12.0 (2026-11-25)
 
 - Lock: hold the thumb up, or press Lock in the panel, and gestures are ignored until unlocked. Run the tracker's installer again after the update.

@@ -3,8 +3,8 @@
   <!-- SPDX-License-Identifier: MIT -->
   <name>HandNav</name>
   <description>Navigate the 3D view with one hand in front of a webcam: orbit, roll, pan, zoom and standard views. macOS only; needs a separately installed hand tracker.</description>
-  <version>0.12.0</version>
-  <date>2026-11-25</date>
+  <version>0.13.0</version>
+  <date>2026-11-28</date>
   <maintainer email="sasha-nordiclab@users.noreply.github.com">sasha_nordiclab</maintainer>
   <license file="LICENSE">MIT</license>
   <url type="repository" branch="main">https://github.com/sasha-nordiclab/HandNav</url>

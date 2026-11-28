@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ICONS = os.path.join(HERE, "resources", "icons")
 # The tracker is a separate program that the user installs with tracker/install.sh.
 TRACKER_DIR = os.path.expanduser("~/Library/Application Support/HandNav")
-TRACKER_VERSION = "6"   # must match tracker/VERSION
+TRACKER_VERSION = "7"   # must match tracker/VERSION
 INSTALLER = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tracker", "install.sh")
 HELPER_APP = os.path.join(TRACKER_DIR, "HandNavTracker.app")
 TRACKER_LOG = os.path.join(TRACKER_DIR, "tracker.log")        # output of the windowless tracker
@@ -273,6 +273,8 @@ class Navigator(QtCore.QObject):
         app = QtCore.QCoreApplication.instance()
         if app is not None:  # do not leave the camera on when FreeCAD quits
             app.aboutToQuit.connect(self.stop)
+            if hasattr(app, "applicationStateChanged"):
+                app.applicationStateChanged.connect(lambda _state: self.send_state())
 
     # --- lifecycle -------------------------------------------------------
     def running(self):
@@ -305,6 +307,7 @@ class Navigator(QtCore.QObject):
             self.dock = PreviewDock(mw, _use_terminal(), not auto)
             mw.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dock)
             self.dock.show_section(p.GetString("PanelSection", ""))
+            self.dock.visibilityChanged.connect(lambda _on: self.send_state())
         if problem:
             App.Console.PrintWarning("HandNav: %s Run in Terminal: %s\n" % (problem, install_command()))
             if self.dock is not None:
@@ -317,6 +320,8 @@ class Navigator(QtCore.QObject):
             self._write_args()
             if auto:
                 self._launch(_use_terminal())
+            for ms in (3000, 8000):   # the tracker cannot hear before it is up
+                QtCore.QTimer.singleShot(ms, self.send_state)
         except OSError as e:
             App.Console.PrintError("HandNav: could not start the tracker (%s)\n" % e)
             self.stop()
@@ -369,11 +374,23 @@ class Navigator(QtCore.QObject):
             self.dock.lock_button.setChecked(on)
         self._show_mode("locked" if on else "idle")
 
+    def _state(self):
+        """What the tracker should know about FreeCAD: in the background, panel shown."""
+        app = QtGui.QGuiApplication.instance()
+        background = (_p().GetBool("PauseInBackground", True) and app is not None
+                      and app.applicationState() != QtCore.Qt.ApplicationActive)
+        preview = self.dock is not None and self.dock.isVisible() and not self.dock.visibleRegion().isEmpty()
+        return {"standby": bool(background), "preview": bool(preview)}
+
+    def send_state(self):
+        if self.running() and self.token:
+            self._to_tracker(("set %s %s" % (self.token, json.dumps(self._state()))).encode())
+
     def tune_tracker(self):
         """Hand the current thresholds to the running tracker."""
         if not self.token:
             return
-        values = json.dumps(prefs.live_values())
+        values = json.dumps(dict(prefs.live_values(), **self._state()))
         self._to_tracker(("set %s %s" % (self.token, values)).encode())
         try:
             self._write_args()   # for a tracker that is still starting, or started again by hand

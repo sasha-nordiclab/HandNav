@@ -56,6 +56,7 @@ UDP on 127.0.0.1. Tracker → addon on `Port` (47800), addon → tracker on `Por
 - **macOS limits UDP datagrams to 9 KB** unless `SO_SNDBUF` is raised (preview frames).
 - **A connected UDP socket** reports a closed port on the *next* send; that is how the tracker notices that FreeCAD is gone.
 - **`num_hands=2` halves the frame rate**: palm detection (about 26 ms) then runs on every frame instead of only when the hand is lost. One hand is the default.
+- **Power:** without a hand, palm detection on the whole picture costs about 20 ms per frame and dominated the load (75 % of a core). `Pace` keeps the full rate for gestures only; the camera is off while FreeCAD is in the background (`standby`), and the preview is sent only while the panel is visible. Now about 30 % with a hand in view, 0 % in the background.
 - **MediaPipe pulls in matplotlib**, whose first import builds a font index (30 to 46 s). The installer does it (`MPLCONFIGDIR`).
 - **`mediapipe` depends on `opencv-contrib-python`**: never add `opencv-python` next to it.
 - **Face detection** (BlazeFace short range) misses faces below about 100 px in the whole 960×540 frame, hence the square parts in `FaceSearch`. MediaPipe's world landmarks give the scale of the hand independent of its pose (`true_palm`): about 0.55 of the face height for a hand on the face, 0.8 and more in front of it.
